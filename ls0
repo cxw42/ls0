@@ -1,0 +1,114 @@
+#!/usr/bin/env perl
+# ls0: A "ls" replacement that null-terminates its output filenames.
+
+# Style note: "hr" (hash ref), "lr" (list ref), "sr" (string ref),
+# "nr" (numeric ref) Hungarian prefixes are used on scalars.
+
+# === Code ==============================================================
+exit main(@ARGV);   # Invoke
+
+# --- Syntax ---
+use strict;
+use warnings;
+
+use constant false => 0;
+use constant true  => 1;
+
+# --- Imports ---
+use Getopt::Long;
+use Pod::Usage;
+
+# --- Constants ---
+use constant EXIT_OK => 0;          # success
+use constant EXIT_FILE_ERR => 1;    # couldn't access a file
+use constant EXIT_PARAM_ERR => 2;   # couldn't understand the command line
+
+# --- Names of command-line arguments ---
+use constant {
+    ALL_DOT => 'a',
+    MOST_DOT => 'A',
+    DIR_AS_DIR => 'd'
+};
+
+# --- Forward declarations ---
+sub parse_command_line_into;
+
+# === Main ==============================================================
+sub main {
+    my %opts;
+    parse_command_line_into \%opts;     # Modifies @ARGV.
+    print %opts;
+    print "\n";
+    print @ARGV;
+    print "\n";
+} # main()
+
+# === TODO worker routines ==============================================
+
+# === Command line ======================================================
+
+sub parse_command_line_into {
+# Takes a reference to a hash into which the options will go.
+# Exits on failure or if help text was printed.
+# Modifies @ARGV, since the input command line may well be a long list from
+# xargs, and we don't want to make an expensive copy.
+
+    my $hrOptsOut = shift;
+
+    Getopt::Long::Configure ("gnu_getopt");
+
+    GetOptions($hrOptsOut,  # destination hash
+        'help|?', 'man',
+        ALL_DOT, MOST_DOT, DIR_AS_DIR,
+        )
+    or pod2usage(2);
+
+    # Help, if requested
+    pod2usage(1) if defined $hrOptsOut->{help};
+    pod2usage(-verbose => 2) if defined $hrOptsOut->{man};
+} # parse_command_line_into()
+
+__END__
+
+# Usage
+=head1 NAME
+
+ls0 - List filenames, with each output null-terminated.
+
+=head1 SYNOPSIS
+
+ls0 [options] [--] [pathspecs]
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-a>
+
+also list files beginning with a '.'
+
+=item B<-A>
+
+also list files beginning with a '.', except for '.' and '..'
+
+=item B<-d>
+
+list directories as directories; don't list their contents
+
+=back
+
+=head1 COPYRIGHT
+
+Copyright (c) 2016 Chris White <http://www.devwrench.com>
+
+Inspired by https://stackoverflow.com/a/41168189/2877364 by
+myself, https://stackoverflow.com/users/2877364/cxw .
+Code based in part on http://stackoverflow.com/a/13999717/2877364 by
+http://stackoverflow.com/users/1922919/turningtaxis
+and on http://stackoverflow.com/a/3960071/2877364 by
+http://stackoverflow.com/users/459338/ruel
+
+=cut
+
+# vi: set ts=4 sts=4 sw=4 et ai ff=unix fenc=utf8: #
+
