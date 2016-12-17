@@ -1,5 +1,6 @@
 #!/usr/bin/env perl
 # ls0: A "ls" replacement that null-terminates its output filenames.
+# To see the output on the console, pipe it to cat -A.  Nulls show as ^@.
 
 # Style note: "hr" (hash ref), "lr" (list ref), "sr" (string ref),
 # "nr" (numeric ref) Hungarian prefixes are used on scalars.
@@ -19,31 +20,92 @@ use Getopt::Long;
 use Pod::Usage;
 
 # --- Constants ---
-use constant EXIT_OK => 0;          # success
-use constant EXIT_FILE_ERR => 1;    # couldn't access a file
-use constant EXIT_PARAM_ERR => 2;   # couldn't understand the command line
+use constant DEBUG => 1;
+
+use constant {
+    EXIT_OK => 0,          # success
+    EXIT_FILE_ERR => 1,    # couldn't access at least one file
+    EXIT_PARAM_ERR => 2,   # couldn't understand the command line
+};
 
 # --- Names of command-line arguments ---
 use constant {
     ALL_DOT => 'a',
     MOST_DOT => 'A',
-    DIR_AS_DIR => 'd'
+    DIR_AS_DIR => 'd',
+    # TODO figure out the best way to handle these.
+    #AT_FILE => '@',     # file listing other inputs, NULL separated.
+    #AT_FILE_GOPTS => '=s@', # Getopt options for AT_FILE
+    #AT_FILE_NL => '@n', # file, EOL separated (platform-specific \r, \n, \r\n)
+    #AT_FILE_NL_GOPTS => '=s@',
 };
 
 # --- Forward declarations ---
-sub parse_command_line_into;
+sub parse_command_line_into;    #takes and modifies hrOptions
+sub process_pathspecs;
+    # takes hrOptions, lrPathspecs, and lrFailures.
+    # Returns true if all pathspecs were found.  Otherwise, fills in lrFailures
+    # with the pathspecs that failed and returns false.
+sub make_printable;     # Returns a printable representation of the arg string
 
 # === Main ==============================================================
 sub main {
     my %opts;
+    print STDERR ("cmdline=>",join("|",@ARGV),"\n") if DEBUG;
     parse_command_line_into \%opts;     # Modifies @ARGV.
-    print %opts;
-    print "\n";
-    print @ARGV;
-    print "\n";
+    #DEBUG
+    #print %opts;
+    #print "\n";
+    #print @ARGV;
+    #print "\n";
+    #print "foo\0bar\0";
+
+    my @failures;   # which pathspecs we couldn't process
+    my $success=process_pathspecs(\%opts, \@ARGV, \@failures);
+
+    if(!$success) {
+        print STDERR ("failures=>",join("|",@failures),"\n") if DEBUG;
+        # Print all the errors, converting nonprintable characters to hex
+        # escapes.
+        print STDERR "Could not process the following pathspecs:\n";
+        print STDERR (
+            join("\n", (map make_printable, @failures) ),
+            "\n"
+        );
+        exit EXIT_FILE_ERR;
+    } #endif !$success
+
 } # main()
 
-# === TODO worker routines ==============================================
+# === Worker routines ===================================================
+
+sub process_pathspecs {
+    my ($hrOpts, $lrPaths, $lrFailures) = @_;
+        #http://stackoverflow.com/q/8831278/2877364
+    my @addl;   # this will hold paths to be processed next.
+                # Using @addl means we don't have to mutate a possibly-long
+                # @ARGV.
+
+    for my $path (@$lrPaths) {
+        print STDERR "Saw $path\n" if DEBUG;
+        push @{$lrFailures}, $path; # DEBUG
+    } # foreach $path
+
+    if(@addl) {
+        @_=($hrOpts, \@addl, $lrFailures);
+        goto &process_pathspecs;    # tail recurse to process @addl
+    }
+
+    return !@{$lrFailures};   # Succeeded if lrFailures is empty.
+} # process_pathspecs()
+
+sub make_printable {
+# Return a printable version (currently hex escapes) of the original string.
+# TODO change this from hex escapes to cat -v format.
+    return s/(\\|[^[:print:]])/'\x'.unpack('H*', $1)/ger;
+        # Thanks for the unpack() call to
+        # http://perldoc.perl.org/perlpacktut.html#The-Basic-Principle
+} # make_printable()
 
 # === Command line ======================================================
 
@@ -55,7 +117,7 @@ sub parse_command_line_into {
 
     my $hrOptsOut = shift;
 
-    Getopt::Long::Configure ("gnu_getopt");
+    Getopt::Long::Configure qw(gnu_getopt);
 
     GetOptions($hrOptsOut,  # destination hash
         'help|?', 'man',
@@ -66,6 +128,13 @@ sub parse_command_line_into {
     # Help, if requested
     pod2usage(1) if defined $hrOptsOut->{help};
     pod2usage(-verbose => 2) if defined $hrOptsOut->{man};
+
+    if(!@ARGV) {     # If we have no args, process the current dir
+        push @ARGV, '.';
+    }
+
+    print STDERR ("pathspecs=>",join("\n",@ARGV),"\n") if DEBUG;
+
 } # parse_command_line_into()
 
 __END__
@@ -97,9 +166,27 @@ list directories as directories; don't list their contents
 
 =back
 
+=head1 DIFFERENCES BETWEEN GNU ls(1) and ls0(1)
+
+The following GNU ls(1) options are not supported by ls0:
+
+=over 4
+
+=item B<-b>, B<--escape>
+
+We don't print escapes; we print raw characters.  Pipe the output of ls0 to
+B<cat -A> to see exactly what's coming out in a human-readable form.
+
+=item B<-1> (print single line)
+
+No need for it; we're not printing lines.
+
+=back
+
 =head1 COPYRIGHT
 
 Copyright (c) 2016 Chris White <http://www.devwrench.com>
+CC-BY-SA 3.0
 
 Inspired by https://stackoverflow.com/a/41168189/2877364 by
 myself, https://stackoverflow.com/users/2877364/cxw .
