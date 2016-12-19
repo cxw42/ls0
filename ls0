@@ -2,8 +2,11 @@
 # ls0: A "ls" replacement that null-terminates its output filenames.
 # To see the output on the console, pipe it to cat -A.  Nulls show as ^@.
 
-# Style note: "hr" (hash ref), "lr" (list ref), "sr" (string ref),
-# "nr" (numeric ref) Hungarian prefixes are used on scalars.
+# Style note: Hungarian prefixes are used on scalars:
+#   "hr" (hash ref), "lr" (list ref), "sr" (string ref), "nr" (numeric ref),
+#   "b" (boolean), "s" (string)
+
+package Com::DevWrench::Ls0;
 
 # === Code ==============================================================
 exit main(@ARGV);   # Invoke
@@ -18,16 +21,24 @@ use constant true  => 1;
 # --- Imports ---
 use Getopt::Long;
 use Pod::Usage;
-use File::Glob ':bsd_glob';
+use File::Spec::Functions;
+use File::stat;
+use Fcntl ':mode';
+#use File::Glob ':bsd_glob';
 
 # --- Constants ---
 use constant DEBUG => 1;
 
-use constant {
+use constant {          # shell exit codes
     EXIT_OK => 0,          # success
     EXIT_FILE_ERR => 1,    # couldn't access at least one file
     EXIT_PARAM_ERR => 2,   # couldn't understand the command line
 };
+
+use constant {          # record terminators
+    TERM_NULL => "\0",
+    TERM_EOL => "\n",   # which will be translated to CRLF if necessary.
+};                      # per http://www.perlmonks.org/?node_id=890769
 
 # --- Names of command-line arguments ---
 use constant {  # *_GOPTS are additional parameters for Getopt::Long
@@ -35,23 +46,37 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     MOST_DOT => 'A',
     ESCAPE_OUTPUT => 'b', ESCAPE_OUTPUT_GOPTS => '|escape',
     DIR_AS_DIR => 'd',
-    OUTPUT_SEPAR_IS_EOL => 'eol',
+    OUTPUT_SEPAR_IS_EOL => 'eol', OUTPUT_SEPAR_IS_EOL_GOPTS => '!',
     AT_FILE => 'from',          # file listing other inputs, NULL separated.
     AT_FILE_GOPTS => '=s@',     # Getopt options for AT_FILE
     AT_FILE_NL => 'fromeol',    # file, EOL separated (platform-specific)
     AT_FILE_NL_GOPTS => '=s@',  # Getopt options
     DO_GLOB => 'glob',
+    RECURSE => 'R',
+    RECURSIVE_GLOB => 'rglob',
 
     # Other options not specified on the command line, but included in the hash
     OUTPUT_SEPAR => 'output_separator',     # \n or \0
+    DEPTH => 'depth',
 };
 
+# TODO RESUME HERE distinguish possibly globbable paths from the results of
+# globs, which should not be re-globbed.
+# TODO maybe carry the stat structure along with each pathspec?
+
 # --- Forward declarations ---
-sub parse_command_line_into;    #takes and modifies hrOptions
 sub process_pathspecs;
-    # takes hrOptions, lrPathspecs, and lrFailures.
-    # Returns true if all pathspecs were found.  Otherwise, fills in lrFailures
-    # with the pathspecs that failed and returns false.
+    # takes hrOpts, lrPathspecs, lrOutputs, and lrFailures.
+    # Adds to lrOutputs any outputs and to lrFailures any error messages.
+sub process_one_pathspec;
+    # takes (hrOpts, srPathspec, lrFailures, lrAddl [, bDontGlob].
+    # Adds to lrAddl any pathspecs needing processing.  This yields a breadth-
+    # first search of the space.
+
+sub sort_results;
+    # takes hrOpts, lrResults
+
+sub parse_command_line_into;    #takes and modifies hrOpts
 sub make_printable;     # Returns a printable representation of the arg string
 
 # === Main ==============================================================
@@ -66,50 +91,133 @@ sub main {
     #print "\n";
     #print "foo\0bar\0";
 
-    my @failures;   # which pathspecs we couldn't process
-    my $success=process_pathspecs(\%opts, \@ARGV, \@failures);
+    # Set up for recursive glob: If it has been requested, stash the
+    # provided pathspecs to try at each directory we visit.
+    my @globs;
+    @globs = @ARGV if $opts{RECURSIVE_GLOB};
 
-    if(!$success) {
-        print STDERR ("failures=>",join("|",@failures),"\n") if DEBUG;
+    # Do it, Rockapella!
+    my @failures;   # which pathspecs we couldn't process
+    process_pathspecs(\%opts, \@ARGV, \@ARGV, \@failures);
+        # second \@ARGV is the result
+
+    # Print the regular results
+    if(@ARGV) {
+        sort_results \%opts, \@ARGV;
+
+        my $sep = $opts{OUTPUT_SEPAR};
+        if($opts{ESCAPE_OUTPUT}) {
+            print join($sep, map { "=> " . make_printable $_ } @ARGV), $sep;
+        } else {        # => is for debug
+            print join($sep, map { "=> " . $_ } @ARGV), $sep;
+        }
+    } # endif any results
+
+    # Report any errors
+    if(@failures) {
         # Print all the errors, converting nonprintable characters to hex
-        # escapes.
-        print STDERR "Could not process the following pathspecs:\n";
+        # escapes.  Errors are currently not sorted.
         print STDERR (
             join("\n", (map make_printable, @failures) ),
             "\n"
         );
         exit EXIT_FILE_ERR;
-    } #endif !$success
+    } #endif @failures
 
+    exit EXIT_OK;
 } # main()
 
 # === Worker routines ===================================================
 
 sub process_pathspecs {
-    my ($hrOpts, $lrPaths, $lrFailures) = @_;
-        #http://stackoverflow.com/q/8831278/2877364
+    my ($hrOpts, $lrPaths, $lrOutputs, $lrFailures) = @_;
     my @addl;   # this will hold paths to be processed next.
                 # Using @addl means we don't have to mutate a possibly-long
                 # @ARGV.
 
     for my $path (@$lrPaths) {
-        print STDERR "Saw $path\n" if DEBUG;
-        push @{$lrFailures}, $path; # DEBUG
+        print STDERR "Processing $path\n" if DEBUG;
+        process_one_pathspec $hrOpts, \$path, $lrFailures, \@addl;
+        #push @{$lrFailures}, $path; # DEBUG
     } # foreach $path
 
+    # If we are processing anything other than @ARGV, tack the results onto
+    # the ever-growing @ARGV.  We do this in case @ARGV is a long list from
+    # an xargs --- we don't want to copy it, just in case.
+    if($lrPaths != $lrOutputs) {
+        push @$lrOutputs, @$lrPaths;
+    }
+
     if(@addl) {
-        @_=($hrOpts, \@addl, $lrFailures);
+        @_=($hrOpts, \@addl, $lrOutputs, $lrFailures);
         goto &process_pathspecs;    # tail recurse to process @addl
     }
 
-    return !@{$lrFailures};   # Succeeded if lrFailures is empty.
 } # process_pathspecs()
+
+sub process_one_pathspec {
+    my ($hrOpts, $srPathspec, $lrFailures, $lrAddl, #bDontGlob
+        ) = @_;
+
+    # TODO finish implementing this
+    #my $pathspec = $$srPathspec;
+    #
+    #if($hrOpts->{&DO_GLOB} && !bDontGlob) {
+    #    my @results = bsd_glob($pathspec);
+    #    if(!@results) {
+    #        push @$lrFailures, "No files matched '" . make_printable $$srPathspec . "'.";
+    #        return;
+    #    } elsif(scalar @results > 1) {
+    #        push @$lrAddl, @results;
+    #       $$srPathspec=undef;     # Remove the glob (or something).
+    #        return;                # Different for recursive glob.
+    #    } else {
+    #        $pathspec = $results[0];
+    #            # If it was a single file, process it now.
+    #            # TODO track whether pathspecs came from glob and don't
+    #            # re-glob them?
+    #    }
+    #} # endif DO_GLOB
+
+    # Process this pathspec, which should be a single directory entry
+
+    my $ps = $$srPathspec;
+    my $fileinfo = stat($ps);
+    if(!$fileinfo) {
+        push @$lrFailures, "Could not stat $ps";
+        return;
+    }
+
+    if(S_ISDIR($fileinfo->mode)) {
+        # TODO RESUME HERE handle . and .. properly.  Don't recurse into
+        # either; don't print either unless ALL_DOT.
+        print STDERR "In dir -$ps-\n" if DEBUG;
+        if($hrOpts->{&RECURSE} && ($ps !~ m/(\.|\.\.)$/)) {
+                # TODO check basename
+            print STDERR "  Recursing\n" if DEBUG;
+            my $dirh;
+            if(!opendir($dirh, $$srPathspec)) {
+                push @$lrFailures, "Could not read directory $$srPathspec";
+            } else {
+                push @$lrAddl,
+                    (map { catfile $$srPathspec, $_ } readdir($dirh));
+            }
+        } #endif RECURSE
+    } else {    # not a directory
+        # Nothing to do here - the pathspec was a regular file, and we are
+        # not currently stashing any information about it.
+    } #endif is a directory else
+
+} # process_one_pathspec()
+
+sub sort_results {
+} # sort_results()
 
 sub make_printable {
 # Return a printable version (currently octal escapes) of the original string.
 # TODO change this from hex escapes to cat -v format.
     return s/(\\|[^[:print:]])/'\\'.(sprintf "%03o", ord $1)/ger;
-        # For hex, use s/.../'\x'.unpack('H*', $1)/ger per 
+        # For hex, use s/.../'\x'.unpack('H*', $1)/ger per
         # http://perldoc.perl.org/perlpacktut.html#The-Basic-Principle
 } # make_printable()
 
@@ -127,14 +235,15 @@ sub parse_command_line_into {
 
     GetOptions($hrOptsOut,  # destination hash
         'help|?', 'man',
-        ALL_DOT, 
-        MOST_DOT, 
+        ALL_DOT,
+        MOST_DOT,
         ESCAPE_OUTPUT . ESCAPE_OUTPUT_GOPTS,
         DIR_AS_DIR,
-        OUTPUT_SEPAR_IS_EOL,
+        OUTPUT_SEPAR_IS_EOL . OUTPUT_SEPAR_IS_EOL_GOPTS,
         AT_FILE . AT_FILE_GOPTS,
         AT_FILE_NL . AT_FILE_NL_GOPTS,
         DO_GLOB,
+        RECURSE,
         )
     or pod2usage(2);
 
@@ -143,12 +252,39 @@ sub parse_command_line_into {
     pod2usage(-verbose => 2) if defined $hrOptsOut->{man};
 
     if(!@ARGV) {     # If we have no args, process the current dir
-        push @ARGV, '.';
-    }
+        my $dirh;
+        if(!opendir($dirh, curdir())) {
+            print STDERR "Could not read current directory";
+            exit EXIT_FILE_ERR;
+        } else {
+            push @ARGV, readdir($dirh);
+        }
+    } # endif no args
 
     print STDERR ("pathspecs=>",join("\n",@ARGV),"\n") if DEBUG;
 
-    # Set the output format and separator based on the provided options
+    # Process implied options.
+    # Note: have to use &RECURSIVE_GLOB per
+    # http://stackoverflow.com/a/96869/2877364 by
+    # http://stackoverflow.com/users/3101/nohat
+    if($hrOptsOut->{&RECURSIVE_GLOB}) {
+        $hrOptsOut->{&RECURSIVE} = 1;
+        $hrOptsOut->{&DO_GLOB} = 1;
+    }
+
+    # Set the output separator based on the provided options
+    $hrOptsOut->{&OUTPUT_SEPAR} = TERM_NULL;     # by default
+    $hrOptsOut->{&OUTPUT_SEPAR} = TERM_EOL       # if implied or requested
+        if ($hrOptsOut->{&ESCAPE_OUTPUT} || $hrOptsOut->{&OUTPUT_SEPAR_IS_EOL});
+    $hrOptsOut->{&OUTPUT_SEPAR} = TERM_NULL      # but --noeol always wins
+        if (defined $hrOptsOut->{&OUTPUT_SEPAR_IS_EOL} &&
+            !$hrOptsOut->{&OUTPUT_SEPAR_IS_EOL}) ;
+
+    # DEBUG
+    if($hrOptsOut->{&RECURSIVE_GLOB} || $hrOptsOut->{&DO_GLOB}) {
+        print STDERR "Globbing not yet implemented.\n";
+        exit EXIT_PARAM_ERR;
+    }
 
 } # parse_command_line_into()
 
@@ -177,17 +313,17 @@ Also list files beginning with a '.', except for '.' and '..'
 
 =item B<-b>, B<--escape>
 
-Print octal escapes for special characters and backslashes.
+Print octal escapes for special characters and backslashes.  Implies --eol
+(newline separators); also specify --noeol if you still want null terminators.
 
 =item B<-d>
 
 List directories as directories; don't list their contents
 
-=item B<--eol>
+=item B<--eol> (disable with B<--noeol>)
 
 Separate output entries with a platform-specific end-of-line sequence
-rather than a NULL.  Not sure why you would want this, but it's easy to add
-just in case!  You could productively use this with B<--glob>, I suppose.
+rather than a NULL.  May be useful with B<-b> or B<--glob>.
 
 =item B<< --from <argfile> >>, B<< --fromeol <argfile> >>
 
@@ -208,6 +344,17 @@ This is provided for shells that don't glob, or don't glob as you expect.
 Make sure to quote the arguments if necessary to prevent your shell from
 globbing before ls0 sees them.
 
+=item B<-R>
+
+Visit subdirectories recursively.
+
+=item B<--rglob>
+
+Glob in ls0 rather than (or in addition to) in the shell.  Try to glob
+the pathspecs given on the command line in each directory visited.
+Implies B<-R> and B<--glob>.
+subdir
+
 =back
 
 =head1 DIFFERENCES BETWEEN GNU ls(1) and ls0(1)
@@ -223,6 +370,11 @@ Read input pathspecs from B<argfile>
 =item B<--glob>
 
 Glob in ls0 rather than (or in addition to) in the shell
+
+=item B<--rglob>
+
+Glob in ls0 rather than (or in addition to) in the shell, and glob in each
+subdir
 
 =back
 
