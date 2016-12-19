@@ -6,6 +6,10 @@
 #   "hr" (hash ref), "lr" (list ref), "sr" (string ref), "nr" (numeric ref),
 #   "b" (boolean), "s" (string)
 
+# TODO? add an option to prune specific directories?
+# TODO store more info with each path: name, BFS pass # or depth,
+# whether glob result or not.
+
 package Com::DevWrench::Ls0;
 
 # === Code ==============================================================
@@ -22,6 +26,7 @@ use constant true  => 1;
 use Getopt::Long;
 use Pod::Usage;
 use File::Spec::Functions;
+use File::Basename;
 use File::stat;
 use Fcntl ':mode';
 #use File::Glob ':bsd_glob';
@@ -82,7 +87,7 @@ sub make_printable;     # Returns a printable representation of the arg string
 # === Main ==============================================================
 sub main {
     my %opts;
-    print STDERR ("cmdline=>",join("|",@ARGV),"\n") if DEBUG;
+    #print STDERR ("cmdline=>",join("|",@ARGV),"\n") if DEBUG;
     parse_command_line_into \%opts;     # Modifies @ARGV.
     #DEBUG
     #print %opts;
@@ -94,23 +99,34 @@ sub main {
     # Set up for recursive glob: If it has been requested, stash the
     # provided pathspecs to try at each directory we visit.
     my @globs;
-    @globs = @ARGV if $opts{RECURSIVE_GLOB};
+    @globs = @ARGV if $opts{&RECURSIVE_GLOB};
 
     # Do it, Rockapella!
     my @failures;   # which pathspecs we couldn't process
     process_pathspecs(\%opts, \@ARGV, \@ARGV, \@failures);
         # second \@ARGV is the result
 
-    # Print the regular results
+    # Print the regular results, if any
     if(@ARGV) {
+        # Sort however the user wanted
         sort_results \%opts, \@ARGV;
 
-        my $sep = $opts{OUTPUT_SEPAR};
-        if($opts{ESCAPE_OUTPUT}) {
-            print join($sep, map { "=> " . make_printable $_ } @ARGV), $sep;
-        } else {        # => is for debug
-            print join($sep, map { "=> " . $_ } @ARGV), $sep;
+        # Escape results if requested
+        if($opts{&ESCAPE_OUTPUT}) {
+            for my $result (@ARGV) {
+                next unless defined $result;
+                $result = make_printable $result;
+            }
         }
+
+        # Dump the (possibly escaped) results
+        my $sep = $opts{&OUTPUT_SEPAR};
+
+        for my $result (@ARGV) {
+            next unless defined $result;    # skip ones we cleared
+            print "=> " if DEBUG;
+            print $result, $sep;
+        } # next $result
     } # endif any results
 
     # Report any errors
@@ -136,7 +152,6 @@ sub process_pathspecs {
                 # @ARGV.
 
     for my $path (@$lrPaths) {
-        print STDERR "Processing $path\n" if DEBUG;
         process_one_pathspec $hrOpts, \$path, $lrFailures, \@addl;
         #push @{$lrFailures}, $path; # DEBUG
     } # foreach $path
@@ -188,21 +203,41 @@ sub process_one_pathspec {
         return;
     }
 
+    my ($basename, $dirs) = fileparse($ps);
+        # Don't use splitpath(), which chokes on '.git/.'.
+
+    print STDERR "Processing $ps (basename  -$basename-, dir -$dirs-)\n"
+        if DEBUG;
+
     if(S_ISDIR($fileinfo->mode)) {
         # TODO RESUME HERE handle . and .. properly.  Don't recurse into
         # either; don't print either unless ALL_DOT.
-        print STDERR "In dir -$ps-\n" if DEBUG;
-        if($hrOpts->{&RECURSE} && ($ps !~ m/(\.|\.\.)$/)) {
-                # TODO check basename
-            print STDERR "  Recursing\n" if DEBUG;
-            my $dirh;
-            if(!opendir($dirh, $$srPathspec)) {
-                push @$lrFailures, "Could not read directory $$srPathspec";
-            } else {
-                push @$lrAddl,
-                    (map { catfile $$srPathspec, $_ } readdir($dirh));
+        print STDERR "  is directory\n" if DEBUG;
+        if($basename =~ /^\.{1,2}$/) {  # . and ..
+            if(!$hrOpts->{&ALL_DOT}) {
+                print STDERR "    clearing\n" if DEBUG;
+                $$srPathspec = undef;   # Don't show . and .. unless -a
             }
-        } #endif RECURSE
+
+        } else {    # not . or ..
+
+            # Recurse into subdirectories if requested.
+            # TODO on "ls0 foo" where ./foo is a directory, recurse in, and
+            # don't list the actual dir that was mentioned on the command line
+            if($hrOpts->{&RECURSE} ||               # -R
+                (dirname($dirs) eq curdir()) ) {    # child of curdir
+                print STDERR "  Recursing\n" if DEBUG;
+                my $dirh;
+                if(!opendir($dirh, $$srPathspec)) {
+                    push @$lrFailures, "Could not read directory $$srPathspec";
+                } else {
+                    push @$lrAddl,
+                        (map { my $rv = catfile $$srPathspec, $_;
+                                print STDERR "    Added -$rv-\n" if DEBUG;
+                                $rv } readdir($dirh));
+                }
+            } #endif RECURSE
+        }
     } else {    # not a directory
         # Nothing to do here - the pathspec was a regular file, and we are
         # not currently stashing any information about it.
@@ -216,7 +251,8 @@ sub sort_results {
 sub make_printable {
 # Return a printable version (currently octal escapes) of the original string.
 # TODO change this from hex escapes to cat -v format.
-    return s/(\\|[^[:print:]])/'\\'.(sprintf "%03o", ord $1)/ger;
+    my $in = $_[0] // $_;
+    return $in =~ s/(\\|[^[:print:]])/'\\'.(sprintf "%03o", ord $1)/ger;
         # For hex, use s/.../'\x'.unpack('H*', $1)/ger per
         # http://perldoc.perl.org/perlpacktut.html#The-Basic-Principle
 } # make_printable()
@@ -261,10 +297,10 @@ sub parse_command_line_into {
         }
     } # endif no args
 
-    print STDERR ("pathspecs=>",join("\n",@ARGV),"\n") if DEBUG;
+    #print STDERR ("pathspecs=>",join("\n",@ARGV),"\n") if DEBUG;
 
     # Process implied options.
-    # Note: have to use &RECURSIVE_GLOB per
+    # Note: have to use ampersand on &RECURSIVE_GLOB per
     # http://stackoverflow.com/a/96869/2877364 by
     # http://stackoverflow.com/users/3101/nohat
     if($hrOptsOut->{&RECURSIVE_GLOB}) {
