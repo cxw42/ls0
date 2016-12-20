@@ -4,7 +4,7 @@
 
 # Style note: Hungarian prefixes are used on scalars:
 #   "hr" (hash ref), "lr" (list ref), "sr" (string ref), "nr" (numeric ref),
-#   "b" (boolean), "s" (string)
+#   "b" or "is" (boolean), "s" (string)
 
 # TODO? add an option to prune specific directories?
 # TODO store more info with each path: name, BFS pass # or depth,
@@ -13,7 +13,7 @@
 package Com::DevWrench::Ls0;
 
 # === Code ==============================================================
-exit main(@ARGV);   # Invoke
+exit main();   # Invoke
 
 # --- Syntax ---
 use strict;
@@ -45,6 +45,9 @@ use constant {          # record terminators
     TERM_EOL => "\n",   # which will be translated to CRLF if necessary.
 };                      # per http://www.perlmonks.org/?node_id=890769
 
+# Regexes
+use constant RE_DOT_OR_DOTDOT => qr/^\.{1,2}$/;
+
 # --- Names of command-line arguments ---
 use constant {  # *_GOPTS are additional parameters for Getopt::Long
     ALL_DOT => 'a',
@@ -53,7 +56,7 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     DIR_AS_DIR => 'd',
     OUTPUT_SEPAR_IS_EOL => 'eol', OUTPUT_SEPAR_IS_EOL_GOPTS => '!',
     AT_FILE => 'from',          # file listing other inputs, NULL separated.
-    AT_FILE_GOPTS => '=s@',     # Getopt options for AT_FILE
+    AT_FILE_GOPTS => '|@=s@',   # Getopt options for AT_FILE
     AT_FILE_NL => 'fromeol',    # file, EOL separated (platform-specific)
     AT_FILE_NL_GOPTS => '=s@',  # Getopt options
     DO_GLOB => 'glob',
@@ -63,38 +66,67 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     # Other options not specified on the command line, but included in the hash
     OUTPUT_SEPAR => 'output_separator',     # \n or \0
     DEPTH => 'depth',
+    ONE_ARG => 'one_arg',       # if only one arg provided
 };
 
 # TODO RESUME HERE distinguish possibly globbable paths from the results of
 # globs, which should not be re-globbed.
 # TODO maybe carry the stat structure along with each pathspec?
 
+# --- Worklists ---
+# What ls0 needs to do is defined by a worklist, a list of hash refs.
+# Each hash includes text and various flags.
+sub wl_new; # takes text reference[, hash of flags] and returns a hash ref.
+sub wl_suppress;    # takes hrWorklistItem; sets not to display.
+
+use constant {  # worklist-item fields
+    WL_TEXT_REF => 'text',  # text of the reference
+    WL_IS_TOP => 'is_top',  # whether the item is from the command line
+    WL_IS_GLOB_RESULT => 'is_glob_result',  # whether the item is from glob
+                                            # (so don't re-glob it)
+    WL_DO_NOT_PRINT => 'suppress',      # if true, don't show as a result
+    WL_STAT_REF => 'stat',          # File::stat structure
+};
+
 # --- Forward declarations ---
-sub process_pathspecs;
-    # takes hrOpts, lrPathspecs, lrOutputs, and lrFailures.
-    # Adds to lrOutputs any outputs and to lrFailures any error messages.
-sub process_one_pathspec;
-    # takes (hrOpts, srPathspec, lrFailures, lrAddl [, bDontGlob].
+sub process_worklist;
+    # takes hrOpts, lrGlobs, lrWorklist, lrOutputWorklist, and lrFailures.
+    # Adds to lrOutputWorklist any outputs.  Adds to lrFailures any
+    # string error messages.  May modify @$lrWorklist.
+    # Returns a bool indicating whether at least one worklist item
+    # is to be printed as a result.
+sub process_worklist_item;
+    # takes (hrOpts, lrGlobs, hrWorklistItem, lrFailures, lrAddl [, bDontGlob].
     # Adds to lrAddl any pathspecs needing processing.  This yields a breadth-
-    # first search of the space.
+    # first search of the space.  May modify %$hrWorklistItem.
+    # Returns a bool indicating whether the worklist item is to be printed.
 
 sub sort_results;
-    # takes hrOpts, lrResults
+    # takes hrOpts, lrWorklist
 
-sub parse_command_line_into;    #takes and modifies hrOpts
+sub parse_command_line_into;    # takes and modifies hrOpts; modifies @ARGV
+sub make_worklist;              # takes lrStrings, bIsTop; returns lrWorklist.
+
+# Utility routines
 sub make_printable;     # Returns a printable representation of the arg string
 
 # === Main ==============================================================
 sub main {
-    my %opts;
+    my %opts;           # everything that controls the behaviour of ls0
+    my $lrWorklist;     # what we are being asked to process
+
     #print STDERR ("cmdline=>",join("|",@ARGV),"\n") if DEBUG;
     parse_command_line_into \%opts;     # Modifies @ARGV.
+    $lrWorklist = make_worklist \@ARGV, true;
+
     #DEBUG
-    #print %opts;
-    #print "\n";
-    #print @ARGV;
-    #print "\n";
-    #print "foo\0bar\0";
+    #for my $hrItem (@$lrWorklist) {
+    #    print %$hrItem,"\n";
+    #    print ${$hrItem->{&WL_TEXT_REF}}, "\n";
+    #}
+    #print %opts, "\n";
+    #print @ARGV, "\n";
+    #exit #DEBUG
 
     # Set up for recursive glob: If it has been requested, stash the
     # provided pathspecs to try at each directory we visit.
@@ -103,29 +135,37 @@ sub main {
 
     # Do it, Rockapella!
     my @failures;   # which pathspecs we couldn't process
-    process_pathspecs(\%opts, \@ARGV, \@ARGV, \@failures);
-        # second \@ARGV is the result
+    if(process_worklist(\%opts, \@globs,    # second $lrWorklist is the result
+                            $lrWorklist, $lrWorklist, \@failures)) {
+        # Print the regular results
 
-    # Print the regular results, if any
-    if(@ARGV) {
         # Sort however the user wanted
-        sort_results \%opts, \@ARGV;
+        sort_results \%opts, $lrWorklist;
 
         # Escape results if requested
         if($opts{&ESCAPE_OUTPUT}) {
-            for my $result (@ARGV) {
-                next unless defined $result;
-                $result = make_printable $result;
+            for my $hrWorklistItem (@$lrWorklist) {
+                print STDERR "Checking ",
+                    ${$hrWorklistItem->{&WL_TEXT_REF}}, "\n"
+                    if DEBUG;
+                next if $hrWorklistItem->{&WL_DO_NOT_PRINT};
+                ${$hrWorklistItem->{&WL_TEXT_REF}} =
+                    make_printable ${$hrWorklistItem->{&WL_TEXT_REF}};
+                print STDERR "  escaped as ",
+                    ${$hrWorklistItem->{&WL_TEXT_REF}}, "\n"
+                    if DEBUG;
             }
         }
 
         # Dump the (possibly escaped) results
         my $sep = $opts{&OUTPUT_SEPAR};
 
-        for my $result (@ARGV) {
-            next unless defined $result;    # skip ones we cleared
+        for my $hrWorklistItem (@$lrWorklist) {
+            # skip ones we cleared
+            next if $hrWorklistItem->{&WL_DO_NOT_PRINT};
+
             print "=> " if DEBUG;
-            print $result, $sep;
+            print ${$hrWorklistItem->{&WL_TEXT_REF}}, $sep;
         } # next $result
     } # endif any results
 
@@ -145,33 +185,54 @@ sub main {
 
 # === Worker routines ===================================================
 
-sub process_pathspecs {
-    my ($hrOpts, $lrPaths, $lrOutputs, $lrFailures) = @_;
+sub process_worklist {
+    my ($hrOpts, $lrGlobs, $lrProvidedWorklist, $lrOutputWorklist, $lrFailures,
+        $subsid) = @_;
+        # $subsid is undef the first time we are called, then
+        # true after that.
+
+    my $bHaveResults = false;   # whether there's a result to print
+    my $lrWorklist = $lrProvidedWorklist;   # changes as we run
     my @addl;   # this will hold paths to be processed next.
                 # Using @addl means we don't have to mutate a possibly-long
-                # @ARGV.
+                # $lrWorklist.
 
-    for my $path (@$lrPaths) {
-        process_one_pathspec $hrOpts, \$path, $lrFailures, \@addl;
-        #push @{$lrFailures}, $path; # DEBUG
-    } # foreach $path
+    my $done = false;
+    while(!$done) {
+        print STDERR "**Iter\n" if DEBUG;
+        @addl = ();     # always start fresh
 
-    # If we are processing anything other than @ARGV, tack the results onto
-    # the ever-growing @ARGV.  We do this in case @ARGV is a long list from
-    # an xargs --- we don't want to copy it, just in case.
-    if($lrPaths != $lrOutputs) {
-        push @$lrOutputs, @$lrPaths;
-    }
+        for my $hrWorklistItem (@$lrWorklist) {
+            $bHaveResults ||=
+                process_worklist_item($hrOpts, $hrWorklistItem, $lrFailures, \@addl);
+            #push @{$lrFailures}, $path; # DEBUG
+        } # foreach $path
 
-    if(@addl) {
-        @_=($hrOpts, \@addl, $lrOutputs, $lrFailures);
-        goto &process_pathspecs;    # tail recurse to process @addl
-    }
+        # If we are processing anything other than the output worklist,
+        # tack the results onto that ever-growing list.  We do this in
+        # case @ARGV is a long list from an xargs --- we don't want to
+        # copy it, just in case.
+        if($lrWorklist != $lrOutputWorklist) {
+            print STDERR "Adding ", scalar @$lrWorklist, " to ",
+                scalar @$lrOutputWorklist, " entries.\n" if DEBUG;
+            push @$lrOutputWorklist, @$lrWorklist;
+        }
 
-} # process_pathspecs()
+        if(@addl) {     # set up for the next iteration
+            print STDERR "Making worklist\n" if DEBUG;
+            $lrWorklist = make_worklist \@addl;
+            $done = false;
+        } else {
+            $done = true;
+        }
 
-sub process_one_pathspec {
-    my ($hrOpts, $srPathspec, $lrFailures, $lrAddl, #bDontGlob
+    } # while !$done
+
+    return $bHaveResults;
+} # process_worklist()
+
+sub process_worklist_item {
+    my ($hrOpts, $hrWorklistItem, $lrFailures, $lrAddl, #bDontGlob
         ) = @_;
 
     # TODO finish implementing this
@@ -196,58 +257,101 @@ sub process_one_pathspec {
 
     # Process this pathspec, which should be a single directory entry
 
-    my $ps = $$srPathspec;
-    my $fileinfo = stat($ps);
+    my $item_text = ${$hrWorklistItem->{&WL_TEXT_REF}};
+    my $fileinfo = stat($item_text);
+
     if(!$fileinfo) {
-        push @$lrFailures, "Could not stat $ps";
+        push @$lrFailures, "Could not stat $item_text";
         return;
     }
 
-    my ($basename, $dirs) = fileparse($ps);
+    $hrWorklistItem->{&WL_STAT_REF} = \$fileinfo;   # stash for the output code
+    my ($basename, $dirs) = fileparse($item_text);
         # Don't use splitpath(), which chokes on '.git/.'.
 
-    print STDERR "Processing $ps (basename  -$basename-, dir -$dirs-)\n"
+    print STDERR "Processing $item_text (basename  -$basename-, dir -$dirs-)\n"
         if DEBUG;
 
     if(S_ISDIR($fileinfo->mode)) {
-        # TODO RESUME HERE handle . and .. properly.  Don't recurse into
-        # either; don't print either unless ALL_DOT.
         print STDERR "  is directory\n" if DEBUG;
-        if($basename =~ /^\.{1,2}$/) {  # . and ..
-            if(!$hrOpts->{&ALL_DOT}) {
-                print STDERR "    clearing\n" if DEBUG;
-                $$srPathspec = undef;   # Don't show . and .. unless -a
-            }
 
-        } else {    # not . or ..
+        # Shorthand for the context
+        my $all_dot = $hrOpts->{&ALL_DOT};
+        my $most_dot = $hrOpts->{&MOST_DOT};
+        my $recursive = $hrOpts->{&RECURSE};
+        my $dash_d = $hrOpts->{&DIR_AS_DIR};    # dash_d => not recursive
+        my $isTop = $hrWorklistItem->{&WL_IS_TOP};
+            # "top-level" means it was specified on the command line.
+        my $one_arg = $hrOpts->{&ONE_ARG};
 
-            # Recurse into subdirectories if requested.
-            # TODO on "ls0 foo" where ./foo is a directory, recurse in, and
-            # don't list the actual dir that was mentioned on the command line
-            if($hrOpts->{&RECURSE} ||               # -R
-                (dirname($dirs) eq curdir()) ) {    # child of curdir
-                print STDERR "  Recursing\n" if DEBUG;
-                my $dirh;
-                if(!opendir($dirh, $$srPathspec)) {
-                    push @$lrFailures, "Could not read directory $$srPathspec";
-                } else {
-                    push @$lrAddl,
-                        (map { my $rv = catfile $$srPathspec, $_;
-                                print STDERR "    Added -$rv-\n" if DEBUG;
-                                $rv } readdir($dirh));
-                }
-            } #endif RECURSE
+        # Shorthand for special cases in the names
+        my $isD = $basename eq '.';
+        my $isDD = $basename eq '..';
+        my $isDotfile = $basename =~ /^\./;
+
+        print STDERR "  -a $all_dot -A $most_dot -d $dash_d -R $recursive ".
+            "top $isTop one_arg $one_arg . $isD .. $isDD .* $isDotfile\n"
+            if DEBUG;
+
+        # Figure out what to do
+        my $isWanted = (    # dotfile-based filtering
+            (!$isDotfile) ||                    # not a dotfile
+            ($isDotfile && $all_dot) ||         # keep dotfiles
+            ($isDotfile && $most_dot && !$isDD) # keep except . and ..
+        );
+
+        # by default, just list it as a regular entry (if we want it)
+        my $bShouldSuppress = !$isWanted;
+        my $bShouldRecurse = false;
+
+        if( $isTop && $one_arg ) {      # the only arg: descend into it
+            $bShouldSuppress = true;    # and don't print.
+            $bShouldRecurse = true;
         }
+
+        elsif( $isTop ) {               # One of several top-level args:
+            $bShouldSuppress = false;   # print, and descend unless -d.
+            $bShouldRecurse = !$dash_d; # -R is irrelevant here.
+        }
+
+        elsif( $isWanted ) {            # A non-toplevel we want: recurse
+            $bShouldRecurse =           # if requested, and not . or .. .
+                $recursive && !($isD || $isDD);
+        }   # Note -d trumps -R, so we don't have to test $dash_d.
+
+        # --- Now that we've figured out what to do, go do it. ---
+        if($bShouldSuppress) {
+            print STDERR "    supressing\n" if DEBUG;
+            wl_suppress $hrWorklistItem
+        }
+
+        if($bShouldRecurse) {
+            print STDERR "    recursing\n" if DEBUG;
+            my $dirh;
+            if(!opendir($dirh, $item_text)) {
+                push @$lrFailures, "Could not read directory $item_text";
+            } else {
+                push @$lrAddl,
+                    (map { my $rv = catfile $item_text, $_;
+                            print STDERR "    Added -$rv-\n" if DEBUG;
+                            $rv } readdir($dirh));
+                    # Also pushes . and .., which are ignored by the code above
+                    # when we get to them in a later call.
+            } #endif dir opened OK
+        } # endif recursing
+
     } else {    # not a directory
         # Nothing to do here - the pathspec was a regular file, and we are
         # not currently stashing any information about it.
     } #endif is a directory else
 
-} # process_one_pathspec()
+    return !($hrWorklistItem->{&WL_DO_NOT_PRINT});
+} # process_worklist_item()
 
 sub sort_results {
 } # sort_results()
 
+# === Utility routines ==================================================
 sub make_printable {
 # Return a printable version (currently octal escapes) of the original string.
 # TODO change this from hex escapes to cat -v format.
@@ -256,6 +360,27 @@ sub make_printable {
         # For hex, use s/.../'\x'.unpack('H*', $1)/ger per
         # http://perldoc.perl.org/perlpacktut.html#The-Basic-Principle
 } # make_printable()
+
+# === Worklist routines =================================================
+
+sub wl_new {
+    my $srText = shift or die "Can't create worklist item with no text";
+    my %defaults =  (   &WL_IS_TOP => false,
+                        &WL_IS_GLOB_RESULT => false,
+                        &WL_DO_NOT_PRINT => false,
+                    );
+    my %flags = ( %defaults, @_ );  # parameters override defaults
+        # Thanks to Fletch, http://www.perlmonks.org/?node_id=161104
+
+    return +{   &WL_TEXT_REF => $srText,
+                %flags
+            };
+} # wl_new()
+
+sub wl_suppress {
+    my $hrWorklistItem = shift;
+    $hrWorklistItem->{&WL_DO_NOT_PRINT} = true;
+} # wl_suppress()
 
 # === Command line ======================================================
 
@@ -267,8 +392,19 @@ sub parse_command_line_into {
 
     my $hrOptsOut = shift;
 
+    # --- Parse the options ---
     Getopt::Long::Configure qw(gnu_getopt);
 
+    # Set defaults so we don't have to test them with exists().
+    $hrOptsOut->{&ALL_DOT} = false;
+    $hrOptsOut->{&MOST_DOT} = false;
+    $hrOptsOut->{&ESCAPE_OUTPUT} = false;
+    $hrOptsOut->{&DIR_AS_DIR} = false;
+    #No default for OUTPUT_SEPAR_IS_EOL since it's negatable.
+    $hrOptsOut->{&DO_GLOB} = false;
+    $hrOptsOut->{&RECURSE} = false;
+
+    # Get options
     GetOptions($hrOptsOut,  # destination hash
         'help|?', 'man',
         ALL_DOT,
@@ -287,28 +423,62 @@ sub parse_command_line_into {
     pod2usage(1) if defined $hrOptsOut->{help};
     pod2usage(-verbose => 2) if defined $hrOptsOut->{man};
 
-    if(!@ARGV) {     # If we have no args, process the current dir
+    # --- If we have no args, process the current dir. ---
+    # TODO? Move this into process_worklist_item?  `ls -d` matches just '.'.
+    if(!@ARGV) {
+        # Push the contents of curdir() as if they had been listed on the
+        # command line.  We can't just push curdir() without creating a
+        # special case in the inner loop of process_worklist_item, so do
+        # it here to avoid slowing down that routine.
         my $dirh;
         if(!opendir($dirh, curdir())) {
-            print STDERR "Could not read current directory";
-            exit EXIT_FILE_ERR;
+            print STDERR "Could not read directory ", curdir(), "\n";
+            exit EXIT_PARAM_ERR;
         } else {
-            push @ARGV, readdir($dirh);
-        }
+            my $direntry;
+            while( defined($direntry=readdir($dirh)) ) {
+                my ($basename) = fileparse($direntry);
+
+                next unless (
+                    substr($basename,0,1) ne '.' || # not a dotfile
+                    $hrOptsOut->{&ALL_DOT} ||       # keep dotfiles
+                    (   $hrOptsOut->{&MOST_DOT} &&  # keep except . and ..
+                        $basename !~ RE_DOT_OR_DOTDOT
+                    )
+                );
+                print STDERR "Adding $direntry\n" if DEBUG;
+
+                push @ARGV, $direntry;
+            } # next $direntry
+        } # endif opened dir OK
     } # endif no args
 
     #print STDERR ("pathspecs=>",join("\n",@ARGV),"\n") if DEBUG;
 
-    # Process implied options.
+    # --- Process implied options. ---
     # Note: have to use ampersand on &RECURSIVE_GLOB per
     # http://stackoverflow.com/a/96869/2877364 by
     # http://stackoverflow.com/users/3101/nohat
-    if($hrOptsOut->{&RECURSIVE_GLOB}) {
-        $hrOptsOut->{&RECURSIVE} = 1;
-        $hrOptsOut->{&DO_GLOB} = 1;
+
+    # -d overrides -R
+    if($hrOptsOut->{&DIR_AS_DIR}) {
+        $hrOptsOut->{&RECURSIVE} = false;
     }
 
-    # Set the output separator based on the provided options
+    # --rglob implies -R and --glob
+    if($hrOptsOut->{&RECURSIVE_GLOB}) {
+        if(!$hrOptsOut->{&DIR_AS_DIR}) {
+            $hrOptsOut->{&RECURSIVE} = true;
+            $hrOptsOut->{&DO_GLOB} = true;
+        } else {
+            print STDERR "Can't use --rglob and -d together\n";
+            exit EXIT_PARAM_ERR;
+        }
+    } #endif --rglob
+
+    # --- Set internal values based on the provided options ---
+
+    # Output separator
     $hrOptsOut->{&OUTPUT_SEPAR} = TERM_NULL;     # by default
     $hrOptsOut->{&OUTPUT_SEPAR} = TERM_EOL       # if implied or requested
         if ($hrOptsOut->{&ESCAPE_OUTPUT} || $hrOptsOut->{&OUTPUT_SEPAR_IS_EOL});
@@ -316,13 +486,25 @@ sub parse_command_line_into {
         if (defined $hrOptsOut->{&OUTPUT_SEPAR_IS_EOL} &&
             !$hrOptsOut->{&OUTPUT_SEPAR_IS_EOL}) ;
 
-    # DEBUG
+    # How many args?
+    $hrOptsOut->{&ONE_ARG} = (scalar @ARGV == 1);
+
+    # Globbing
     if($hrOptsOut->{&RECURSIVE_GLOB} || $hrOptsOut->{&DO_GLOB}) {
-        print STDERR "Globbing not yet implemented.\n";
+        print STDERR "Globbing not yet implemented.\n";     # DEBUG
         exit EXIT_PARAM_ERR;
     }
 
 } # parse_command_line_into()
+
+sub make_worklist {
+    my $lrStrings = shift;
+    my $isTop = @_ ? shift : false;
+    my @srStringRefs = \(@$lrStrings);
+        # list of string refs to each element of the provided list
+    my @worklist = map { wl_new $_, &WL_IS_TOP => $isTop } @srStringRefs;
+    return \@worklist;
+} # make_worklist()
 
 __END__
 
@@ -349,19 +531,20 @@ Also list files beginning with a '.', except for '.' and '..'
 
 =item B<-b>, B<--escape>
 
-Print octal escapes for special characters and backslashes.  Implies --eol
-(newline separators); also specify --noeol if you still want null terminators.
+Print octal escapes for special characters and backslashes.  Implies B<--eol>
+(newline separators); also specify B<--noeol> if you still want null terminators.
 
 =item B<-d>
 
-List directories as directories; don't list their contents
+List directories as directories; don't list their contents.  Overrides B<-R>.
+Can't be used with B<--rglob>.
 
 =item B<--eol> (disable with B<--noeol>)
 
 Separate output entries with a platform-specific end-of-line sequence
 rather than a NULL.  May be useful with B<-b> or B<--glob>.
 
-=item B<< --from <argfile> >>, B<< --fromeol <argfile> >>
+=item B<< --from <argfile> >> (or B<< -@ <argfile> >>)
 
 Read the pathspecs to be processed from B<argfile>.  Each pathspec should
 be separated by a NULL terminator ('\0').  This is ls_0_, after all.
@@ -382,14 +565,13 @@ globbing before ls0 sees them.
 
 =item B<-R>
 
-Visit subdirectories recursively.
+Visit subdirectories recursively.  No effect if B<-d> is specified.
 
 =item B<--rglob>
 
 Glob in ls0 rather than (or in addition to) in the shell.  Try to glob
 the pathspecs given on the command line in each directory visited.
-Implies B<-R> and B<--glob>.
-subdir
+Implies B<-R> and B<--glob>.  Can't be used with B<-d>.
 
 =back
 
@@ -425,6 +607,10 @@ The following GNU ls(1) options are not supported by ls0:
 No need for it; we're not printing lines.
 
 =back
+
+=head2 Differences in behaviour
+
+None documented yet!
 
 =head1 COPYRIGHT
 
