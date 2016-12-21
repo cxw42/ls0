@@ -392,8 +392,8 @@ sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
     if($hrOpts->{&SORT} eq SORT_NAME) {
         print STDERR "Name-sort\n" if DEBUG;
         @sorted = sort
-            { $direction * (lc($a->text) cmp lc($b->text)) }
-            @$lrWorklist;   # TODO figure out how to handle filename encodings
+            { $direction * ($a->text cmp $b->text) }
+            @$lrWorklist;   # NOTE: sort on byte values, not characters.
     } else {
         die "Unsupported sort type " . $hrOpts->{&SORT} . "\n";
     }
@@ -530,7 +530,8 @@ sub make_worklist {
 
 __END__
 
-# Usage
+# Usage is below
+
 =head1 NAME
 
 ls0 - List filenames, with each output null-terminated.
@@ -610,7 +611,8 @@ Implies B<-R> and B<--glob>.  Can't be used with B<-d>.
 
 Don't sort the results - you get them in whatever order you get them.
 This will likely be the breadth-first search order ls0 currently uses,
-but you SHALL NOT make any assumptions about name order when using this option.
+but you B<shall not> make any assumptions about name order when using 
+this option.
 
 =back
 
@@ -666,6 +668,12 @@ Long live vi!
 =back
 
 =head2 Differences in behaviour
+
+=head3 Default search order
+
+ls(1) sorts case-insensitively by default, e.g., C<alpha, BAR, foo, QUUX>.
+We sort on byte values without regard to case or encoding, e.g. (in ASCII),
+C<BAR, QUUX, alpha, foo>.
 
 =head3 Output format for multiple subdirectories
 
