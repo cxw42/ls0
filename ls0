@@ -54,33 +54,50 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     DIR_AS_DIR => 'd',
     OUTPUT_SEPAR_IS_EOL => 'eol', OUTPUT_SEPAR_IS_EOL_GOPTS => '!',
     AT_FILE => 'from',          # file listing other inputs, NULL separated.
-    AT_FILE_GOPTS => '|@=s@',   # Getopt options for AT_FILE
+    AT_FILE_GOPTS => '|@:s@',   # Getopt options for AT_FILE
     AT_FILE_NL => 'fromeol',    # file, EOL separated (platform-specific)
-    AT_FILE_NL_GOPTS => '=s@',  # Getopt options
+    AT_FILE_NL_GOPTS => ':s@',  # Getopt options
     DO_GLOB => 'glob',
     LEAVES_ONLY => 'leaf',
-    SORT_REVERSE => 'r',
+    SORT_OPT_REVERSE => 'r',
     RECURSE => 'R',
     RECURSIVE_GLOB => 'rglob',
-    SORT_DO_NOT => 'U',
+    SORT_OPT_TIME => 't',           # Sort on some time (mtime by default)
+    SORT_OPT_WHICHTIME => 'time',   # Which time to sort on
+    SORT_OPT_WHICHTIME_GOPTS => '=s',
+    SORT_OPT_NOSORT => 'U',
 
     # Other options not specified on the command line, but included in the hash
     OUTPUT_SEPAR => 'output_separator',     # \n or \0
     DEPTH => 'depth',
     ONE_ARG => 'one_arg',       # if only one arg provided
     SORT => 'sort',             # how to sort
+    SORTFIELD => 'sortfield',   # which field of the stat structure to sort on
+    SORTDIR => 'sortdir',       # default order: 1 for asc; -1 for desc
+    GLOBS => 'globs',           # list ref of the globs to check
 };
 
 # Allowable sort types
 use constant {
-    SORT_NONE => 'none',
-    SORT_NAME => 'name',        # a-z unless reverse.  Default.
-    SORT_EXT => 'ext',          # extension
-    SORT_MTIME => 'mtime',      # newest first unless reverse
-    SORT_SIZE => 'size',        # largest first unless reverse
-    SORT_VER => 'ver',
+    SORT_BY_NONE => 'none',
+    SORT_BY_NAME => 'name',     # a-z unless reverse.  Default.
+    SORT_BY_TEXT => 'text',     # A textual sort on stat->$sortfield
+    SORT_BY_NUM => 'num',       # Ditto, but numeric
+    #SORT_BY_EXT => 'ext',       # extension
+    #SORT_BY_TIME => 'time',     # newest first unless reverse
+    #SORT_BY_SIZE => 'size',     # largest first unless reverse
+    #SORT_BY_VER => 'ver',      # version within a filename.
         # Per https://www.gnu.org/software/coreutils/manual/html_node/Details-about-version-sort.html
+        # TODO support this?  Require the user specify the filename encoding?
     # TODO atime, ctime
+};
+
+# Names of File::Stat fields we can sort on
+use constant {
+    SORTFIELD_ATIME => 'atime',
+    SORTFIELD_CTIME => 'ctime',
+    SORTFIELD_MTIME => 'mtime',
+    # TODO add more
 };
 
 # --- Worklist Items ---
@@ -92,6 +109,7 @@ package Worklist_Item {
     use constant DEBUG => true;
 
     use fields qw(srtext top fromglob visible stat);
+        # TODO later: use Class::Struct instead?
 
     sub new {   # ($self, $srText[, $bIsTop]) -> Worklist_Item
         my ($class, $srText, $isTop) = @_;
@@ -128,13 +146,13 @@ package Worklist_Item {
 
 # --- Forward declarations ---
 sub process_worklist;
-    # takes hrOpts, lrGlobs, lrWorklist, lrOutputWorklist, and lrFailures.
+    # takes hrOpts, lrWorklist, lrOutputWorklist, and lrFailures.
     # Adds to lrOutputWorklist any outputs.  Adds to lrFailures any
     # string error messages.  May modify @$lrWorklist.
     # Returns a bool indicating whether at least one worklist item
     # is to be printed as a result.
 sub process_worklist_item;
-    # takes (hrOpts, lrGlobs, wli, lrFailures, lrAddl [, bDontGlob].
+    # takes (hrOpts, wli, lrFailures, lrAddl [, bDontGlob].
     # Adds to lrAddl any pathspecs needing processing.  This yields a breadth-
     # first search of the space.  May modify $wli.
     # Returns a bool indicating whether the worklist item is visible.
@@ -160,16 +178,20 @@ sub main {
 
     #print STDERR ("cmdline=>",join("|",@ARGV),"\n") if DEBUG;
     parse_command_line_into \%opts;     # Modifies @ARGV.
-    $lrWorklist = make_worklist \@ARGV, true;   # true => top-level args
 
     # Set up for recursive glob: If it has been requested, stash the
     # provided pathspecs to try at each directory we visit.
-    my @globs;
-    @globs = @ARGV if $opts{&RECURSIVE_GLOB};
+    # We don't need to stash for non-recursive glob since the
+    # patterns are already in @ARGV.
+    $opts{&GLOBS} = @ARGV if $opts{&RECURSIVE_GLOB} && @ARGV;
+
+    # Start with what was given on the command line (parse_c_l_into adds
+    # '.' to @ARGV if no args were given, so @ARGV is always nonempty here).
+    $lrWorklist = make_worklist \@ARGV, true;   # true => top-level args
 
     # Do it, Rockapella!
     my @failures;   # which pathspecs we couldn't process
-    if(process_worklist(\%opts, \@globs,
+    if(process_worklist(\%opts,
                             $lrWorklist, $lrWorklist, \@failures)) {
                         #                ^^^^^^^^^^^ output
                         #   ^^^^^^^^^^^ input
@@ -214,7 +236,7 @@ sub main {
 # === Worker routines ===================================================
 
 sub process_worklist {
-    my ($hrOpts, $lrGlobs, $lrProvidedWorklist, $lrOutputWorklist, $lrFailures,
+    my ($hrOpts, $lrProvidedWorklist, $lrOutputWorklist, $lrFailures,
         $subsid) = @_;
 
     my $bHaveVisibleResults = false;        # whether there's a result to print
@@ -225,7 +247,7 @@ sub process_worklist {
 
     my $done = false;
     while(!$done) {
-        print STDERR "**Iter (" . scalar @$lrWorklist . " items)\n" if DEBUG;
+        #print STDERR "**Iter (" . scalar @$lrWorklist . " items)\n" if DEBUG;
         @addl = ();     # always start fresh
 
         for my Worklist_Item $wli (@$lrWorklist) {
@@ -240,15 +262,15 @@ sub process_worklist {
         # case @ARGV is a long list from an xargs --- we don't want to
         # copy it, just in case.
         if($lrWorklist != $lrOutputWorklist) {
-            print STDERR "Adding ", scalar @$lrWorklist, " to ",
-                scalar @$lrOutputWorklist, " entries.\n" if DEBUG;
+            #print STDERR "Adding ", scalar @$lrWorklist, " to ",
+            #    scalar @$lrOutputWorklist, " entries.\n" if DEBUG;
             push @$lrOutputWorklist, @$lrWorklist;
         }
 
         # Set up for the next iteration
         $lrWorklist = make_worklist \@addl;
         $done = !@addl;
-        print STDERR "Made worklist of " . scalar @addl . " items\n" if DEBUG;
+        #print STDERR "Made worklist of " . scalar @addl . " items\n" if DEBUG;
 
     } # while !$done
 
@@ -256,8 +278,7 @@ sub process_worklist {
 } # process_worklist()
 
 sub process_worklist_item {
-    my ($hrOpts, $wli, $lrFailures, $lrAddl, #bDontGlob
-        ) = @_;
+    my ($hrOpts, $wli, $lrFailures, $lrAddl) = @_;
 
     # TODO implement globs
     #my $pathspec = $$srPathspec;
@@ -289,12 +310,13 @@ sub process_worklist_item {
         return;
     }
 
-    $wli->{stat} = \$fileinfo;  # stash for use by the output code
+    $wli->{stat} = $fileinfo;  # stash for use by the output code
+    #print STDERR Dumper($wli->{stat}) if DEBUG;
     my ($basename, $dirs) = fileparse($item_text);
         # Don't use splitpath(), which chokes on '.git/.'.
 
-    print STDERR "Processing $item_text (basename  -$basename-, dir -$dirs-)\n"
-        if DEBUG;
+    #print STDERR "Processing $item_text (basename  -$basename-, dir -$dirs-)\n"
+    #    if DEBUG;
 
     # Shorthand for the context
     my $all_dot = $hrOpts->{&ALL_DOT};
@@ -316,12 +338,12 @@ sub process_worklist_item {
         ($most_dot && !($isD || $isDD))     # -A: keep except . and ..
     );
 
-    print STDERR "  -a $all_dot  -A $most_dot  -d $dash_d  -R $recursive ".
-        "top $isTop  one_arg $one_arg  . $isD  .. $isDD  .* $isDotfile\n"
-        if DEBUG;
+    #print STDERR "  -a $all_dot  -A $most_dot  -d $dash_d  -R $recursive ".
+    #    "top $isTop  one_arg $one_arg  . $isD  .. $isDD  .* $isDotfile\n"
+    #    if DEBUG;
 
     if(S_ISDIR($fileinfo->mode)) {
-        print STDERR "  is directory\n" if DEBUG;
+        #print STDERR "  is directory\n" if DEBUG;
 
         # Figure out what to do
 
@@ -343,19 +365,19 @@ sub process_worklist_item {
 
         # --- Now that we've figured out what to do, go do it. ---
         if($bShouldSuppress) {
-            print STDERR "    suppressing\n" if DEBUG;
+            #print STDERR "    suppressing\n" if DEBUG;
             $wli->suppress;
         }
 
         if($bShouldDescend) {
-            print STDERR "    recursing\n" if DEBUG;
+            #print STDERR "    recursing\n" if DEBUG;
             my $dirh;
             if(!opendir($dirh, $item_text)) {
                 push @$lrFailures, "Could not read directory $item_text";
             } else {
                 push @$lrAddl,
                     (map { my $rv = catfile $item_text, $_;
-                            print STDERR "    Added -$rv-\n" if DEBUG;
+                            #print STDERR "    Added -$rv-\n" if DEBUG;
                             $rv } readdir($dirh));
                     # Also pushes . and .., which are ignored by the code above
                     # when we get to them in a later call.
@@ -363,9 +385,9 @@ sub process_worklist_item {
         } # endif recursing
 
     } else {    # not a directory - treat files, pipes, links, &c. all as files
-        print STDERR "  is file\n" if DEBUG;
+        #print STDERR "  is file\n" if DEBUG;
         if(!$isWanted) {        # Drop dotfiles unless requested
-            print STDERR "    suppressing\n" if DEBUG;
+            #print STDERR "    suppressing\n" if DEBUG;
             $wli->suppress;
         }
     } #endif is a directory else
@@ -376,26 +398,38 @@ sub process_worklist_item {
 sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
     my ($hrOpts, $lrWorklist) = @_;
     my @sorted;     # return array
-    my $direction = $hrOpts->{&SORT_REVERSE} ? -1 : 1;
+    my $sort_type = $hrOpts->{&SORT};
+
+    my $direction = $hrOpts->{&SORT_OPT_REVERSE} ? -1 : 1;
         # Invert the sense of the comparisons if requested
+    $direction *= $hrOpts->{&SORTDIR};
+        # Take into account the default order for this sort type
 
     #print STDERR "In: " . Dumper($lrWorklist) . "\n" if DEBUG;
     #print STDERR "Direction=" . $direction . ", sort=" . $hrOpts->{&SORT} .
     #    ".\n" if DEBUG;
 
-    if($hrOpts->{&SORT} eq SORT_NONE) {
-        print STDERR "Unsorted\n" if DEBUG;
+    if($sort_type eq SORT_BY_NONE) {
+        #print STDERR "Unsorted\n" if DEBUG;
         return $lrWorklist;     # *** EXIT POINT ***
     }
 
     # Sort
-    if($hrOpts->{&SORT} eq SORT_NAME) {
-        print STDERR "Name-sort\n" if DEBUG;
+    if($sort_type eq SORT_BY_NAME) {
+        #print STDERR "Name-sort\n" if DEBUG;
         @sorted = sort
             { $direction * ($a->text cmp $b->text) }
             @$lrWorklist;   # NOTE: sort on byte values, not characters.
+
+    } elsif($sort_type eq SORT_BY_NUM) {
+        my $fld = $hrOpts->{&SORTFIELD};
+        #print STDERR "Numeric sort on ", $fld, "\n" if DEBUG;
+        @sorted = sort
+            { $direction * ($a->{stat}->$fld() <=> $b->{stat}->$fld()) }
+            @$lrWorklist;   # NOTE: sort on byte values, not characters.
+
     } else {
-        die "Unsupported sort type " . $hrOpts->{&SORT} . "\n";
+        die "Unsupported sort type $sort_type\n";   # TODO
     }
     return \@sorted;
 } # sort_results()
@@ -424,6 +458,7 @@ sub parse_command_line_into {
     Getopt::Long::Configure 'gnu_getopt';
 
     # Set defaults so we don't have to test them with exists().
+    %$hrOptsOut = ( &ALL_DOT => false );
     $hrOptsOut->{&ALL_DOT} = false;
     $hrOptsOut->{&MOST_DOT} = false;
     $hrOptsOut->{&ESCAPE_OUTPUT} = false;
@@ -431,9 +466,11 @@ sub parse_command_line_into {
     #No default for OUTPUT_SEPAR_IS_EOL since it's negatable.
     $hrOptsOut->{&DO_GLOB} = false;
     $hrOptsOut->{&LEAVES_ONLY} = false;
-    $hrOptsOut->{&SORT_REVERSE} = false;
+    $hrOptsOut->{&SORT_OPT_REVERSE} = false;
     $hrOptsOut->{&RECURSE} = false;
-    $hrOptsOut->{&SORT_DO_NOT} = false;
+    $hrOptsOut->{&SORT_OPT_TIME} = false;
+    $hrOptsOut->{&SORT_OPT_NOSORT} = false;
+    $hrOptsOut->{&SORT_OPT_WHICHTIME} = SORTFIELD_MTIME;
 
     # Get options
     GetOptions($hrOptsOut,  # destination hash
@@ -447,9 +484,11 @@ sub parse_command_line_into {
         AT_FILE_NL . AT_FILE_NL_GOPTS,
         DO_GLOB,
         LEAVES_ONLY,
-        SORT_REVERSE,
+        SORT_OPT_REVERSE,
         RECURSE,
-        SORT_DO_NOT,
+        SORT_OPT_TIME,
+        SORT_OPT_WHICHTIME . SORT_OPT_WHICHTIME_GOPTS,
+        SORT_OPT_NOSORT,
         )
     or pod2usage(2);
 
@@ -485,11 +524,51 @@ sub parse_command_line_into {
         }
     } #endif --rglob
 
-    # --- Set internal values based on the provided options ---
+    # --- Sorting options ---
+    # TODO expand to support other sorts
 
-    # Sorting
-    $hrOptsOut->{&SORT} = $hrOptsOut->{&SORT_DO_NOT} ? SORT_NONE : SORT_NAME;
-        # TODO expand to support other sorts
+    # Sanity checks.  First, -U prohibits all other sorting options.
+    if($hrOptsOut->{&SORT_OPT_NOSORT} && (
+            $hrOptsOut->{&SORT_OPT_REVERSE} ||
+            $hrOptsOut->{&SORT_OPT_TIME}
+    )) {
+        print STDERR "Can't use -U with any other sort option\n";
+        exit EXIT_PARAM_ERR;
+    }
+
+    if($hrOptsOut->{&SORT_OPT_NOSORT}) {
+        $hrOptsOut->{&SORT} = SORT_BY_NONE;
+
+    } elsif($hrOptsOut->{&SORT_OPT_TIME}) {
+        $hrOptsOut->{&SORT} = SORT_BY_NUM;
+        $hrOptsOut->{&SORTDIR} = -1;    # descending by default
+
+        my %time_types = (      # Possible ways to sort by time.
+            atime => SORTFIELD_ATIME,   # ls(1) gives lots of synonyms.
+            access => SORTFIELD_ATIME,
+            use => SORTFIELD_ATIME,
+            ctime => SORTFIELD_CTIME,
+            status => SORTFIELD_CTIME,
+            mtime => SORTFIELD_MTIME,   # a few others
+            change => SORTFIELD_MTIME,
+        );
+
+        my $which = $hrOptsOut->{&SORT_OPT_WHICHTIME};
+        if(!exists $time_types{$which}) {
+            print STDERR "Unknown time type --time=$which\n",
+                "Valid values are: ",
+                join(", ", sort keys %time_types), ".\n";
+            exit EXIT_PARAM_ERR;
+        }
+        $hrOptsOut->{&SORTFIELD} =
+            $time_types{$hrOptsOut->{&SORT_OPT_WHICHTIME}}
+
+    } else {    # default sort
+        $hrOptsOut->{&SORT} = SORT_BY_NAME;
+        $hrOptsOut->{&SORTDIR} = 1;     # ascending by default
+    }
+
+    # --- Set other internal values based on the provided options ---
 
     # Output separator
     $hrOptsOut->{&OUTPUT_SEPAR} = TERM_NULL;     # by default
@@ -569,15 +648,17 @@ Can't be used with B<--rglob>.
 Separate output entries with a platform-specific end-of-line sequence
 rather than a NULL.  May be useful with B<-b> or B<--glob>.
 
-=item B<< --from <argfile> >> (or B<< -@ <argfile> >>)
+=item B<< --from [argfile] >> (or B<< -@ [argfile] >>)
 
-Read the pathspecs to be processed from B<argfile>.  Each pathspec should
+Read the pathspecs to be processed from B<argfile>, or from standard input
+if no B<argfile> is specified.  Each pathspec in B<argfile>should
 be separated by a NULL terminator ('\0').  This is ls_0_, after all.
 
-=item B<< --fromeol <argfile> >>
+=item B<< --fromeol [argfile] >>
 
-Read the pathspecs to be processed from B<argfile>.  Each pathspec should
-be separated by a platform-specific end-of-line (C<\r>, C<\n>, or C<\r\n>).
+As B<--from>, but each pathspec in B<argfile> (or standard input, by default)
+should be separated by a platform-specific end-of-line
+(C<\r>, C<\n>, or C<\r\n>).
 If you use this, make sure B<argfile> doesn't list any filenames that include
 end-of-lines.
 
@@ -607,11 +688,22 @@ Glob in ls0 rather than (or in addition to) in the shell.  Try to glob
 the pathspecs given on the command line in each directory visited.
 Implies B<-R> and B<--glob>.  Can't be used with B<-d>.
 
+=item B<-t>
+
+Sort by time, newest first (unless B<-r>).  Uses the modification time
+unless B<--time> is given.
+
+=item B<< --time <timeval> >>
+
+Use B<< <timeval> >> as the time when sorting.  Run C<ls0 --time=> to see
+the list of available times.  At least B<atime>, B<ctime>, and B<mtime>
+are available.
+
 =item B<-U>
 
 Don't sort the results - you get them in whatever order you get them.
 This will likely be the breadth-first search order ls0 currently uses,
-but you B<shall not> make any assumptions about name order when using 
+but you B<shall not> make any assumptions about name order when using
 this option.
 
 =back
