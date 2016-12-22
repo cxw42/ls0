@@ -66,6 +66,7 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     SORT_OPT_WHICHTIME => 'time',   # Which time to sort on
     SORT_OPT_WHICHTIME_GOPTS => '=s',
     SORT_OPT_NOSORT => 'U',
+    LIKE_XARGS => "xargs",
 
     # Other options not specified on the command line, but included in the hash
     OUTPUT_SEPAR => 'output_separator',     # \n or \0
@@ -469,8 +470,9 @@ sub parse_command_line_into {
     $hrOptsOut->{&SORT_OPT_REVERSE} = false;
     $hrOptsOut->{&RECURSE} = false;
     $hrOptsOut->{&SORT_OPT_TIME} = false;
-    $hrOptsOut->{&SORT_OPT_NOSORT} = false;
     $hrOptsOut->{&SORT_OPT_WHICHTIME} = SORTFIELD_MTIME;
+    $hrOptsOut->{&SORT_OPT_NOSORT} = false;
+    $hrOptsOut->{&LIKE_XARGS} = false;
 
     # Get options
     GetOptions($hrOptsOut,  # destination hash
@@ -523,6 +525,12 @@ sub parse_command_line_into {
             exit EXIT_PARAM_ERR;
         }
     } #endif --rglob
+
+    # --xargs implies "--from -"
+    if($hrOptsOut->{&LIKE_XARGS}) {
+        print STDERR "--xargs not yet implemented.\n";     # DEBUG
+        exit EXIT_PARAM_ERR;
+    }
 
     # --- Sorting options ---
     # TODO expand to support other sorts
@@ -588,6 +596,14 @@ sub parse_command_line_into {
         exit EXIT_PARAM_ERR;
     }
 
+    # --- at-files ---
+    # TODO
+    #   - check that the specified files are unique (can't list the same
+    #       @file twice)
+    #   - check that the specified files are readable
+    #   - set binmode on -@ (not on --fromeol
+    # Read the entries
+
     # DEBUG
     if($hrOptsOut->{&LEAVES_ONLY}) {
         print STDERR "--leaf not yet implemented.\n";     # DEBUG
@@ -607,9 +623,13 @@ sub make_worklist {
     return \@worklist;
 } # make_worklist()
 
+# Usage manual is below
+
 __END__
 
-# Usage is below
+=pod
+
+=encoding UTF-8
 
 =head1 NAME
 
@@ -653,14 +673,20 @@ rather than a NULL.  May be useful with B<-b> or B<--glob>.
 Read the pathspecs to be processed from B<argfile>, or from standard input
 if no B<argfile> is specified.  Each pathspec in B<argfile>should
 be separated by a NULL terminator ('\0').  This is ls_0_, after all.
+The input is read in binary mode, so filenames can contain any non-NULL
+character.
+
+See L</"Reading argfiles"> for details.
 
 =item B<< --fromeol [argfile] >>
 
 As B<--from>, but each pathspec in B<argfile> (or standard input, by default)
 should be separated by a platform-specific end-of-line
-(C<\r>, C<\n>, or C<\r\n>).
-If you use this, make sure B<argfile> doesn't list any filenames that include
-end-of-lines.
+(C<\r>, C<\n>, or C<\r\n>).  B<CAUTION:> B<--fromeol> does not unescape any
+characters.  If you use this, make sure the filenames in B<argfile> don't
+contain end-of-line or end-of-file characters.
+
+See L</"Reading argfiles"> for details.
 
 =item B<--glob>
 
@@ -705,6 +731,40 @@ Don't sort the results - you get them in whatever order you get them.
 This will likely be the breadth-first search order ls0 currently uses,
 but you B<shall not> make any assumptions about name order when using
 this option.
+
+=item B<--xargs>
+
+A convenient synonym for C<--from ->.  For example, instead of
+C<find ... | xargs ls>, you can use C<find ... -print0 | ls0 --xargs>
+to get the same effect with the benefits of (1) the safety NULL terminators
+provide, and (2) support for a higher match count than the command line
+can handle.
+
+=back
+
+=head2 Reading argfiles
+
+The B<--from> and B<--fromeol> options read argfiles and treat entries in those
+files as if those entries had been specified on the command line.  Things to
+bear in mind:
+
+=over 4
+
+=item *
+
+The filename C<->, as well as an omitted argfile name, refers to standard
+input.
+
+=item *
+
+You can't specify the same B<argfile> for more than one
+B<--from> or B<--fromeol> option.
+
+=item *
+
+You B<shall not> make any assumptions about the relative order of items
+listed on the command line or in argfiles.  In any case, the output order is
+controlled only by any sorting options you provide.
 
 =back
 
@@ -796,15 +856,15 @@ example, you may get:
 
 =head1 COPYRIGHT
 
-Copyright (c) 2016 Chris White <http://www.devwrench.com>
+Copyright (c) 2016 Chris White L<http://www.devwrench.com>
 CC-BY-SA 3.0
 
-Inspired by https://stackoverflow.com/a/41168189/2877364 by
-myself, https://stackoverflow.com/users/2877364/cxw .
-Code based in part on http://stackoverflow.com/a/13999717/2877364 by
-http://stackoverflow.com/users/1922919/turningtaxis
-and on http://stackoverflow.com/a/3960071/2877364 by
-http://stackoverflow.com/users/459338/ruel
+Inspired by L<https://stackoverflow.com/a/41168189/2877364> by
+myself, L<cxw|https://stackoverflow.com/users/2877364/cxw>.
+Code based in part on L<http://stackoverflow.com/a/13999717/2877364> by
+L<turningtaxis|http://stackoverflow.com/users/1922919/turningtaxis>
+and on L<http://stackoverflow.com/a/3960071/2877364> by
+L<ruel|http://stackoverflow.com/users/459338/ruel>.
 
 =cut
 
