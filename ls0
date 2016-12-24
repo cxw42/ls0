@@ -17,17 +17,18 @@ exit main();   # Invoke
 use strict;
 use warnings;
 
-use constant { false => 0, true  => 1 };
+use constant { false => !!0, true  => !!1 };
 
 # --- Imports ---
 use Getopt::Long;
 use Pod::Usage;
 use File::Spec::Functions;
-use File::Basename;
+use File::Basename 'fileparse';
 use File::stat;
 use Fcntl ':mode';
 #use File::Glob ':bsd_glob';
 use Data::Dumper;
+#use Class::Struct;
 
 # --- Constants ---
 use constant DEBUG => 1;
@@ -54,9 +55,9 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     DIR_AS_DIR => 'd',
     OUTPUT_SEPAR_IS_EOL => 'eol', OUTPUT_SEPAR_IS_EOL_GOPTS => '!',
     AT_FILE => 'from',          # file listing other inputs, NULL separated.
-    AT_FILE_GOPTS => '|@:s@',   # Getopt options for AT_FILE
-    AT_FILE_NL => 'fromeol',    # file, EOL separated (platform-specific)
-    AT_FILE_NL_GOPTS => ':s@',  # Getopt options
+    AT_FILE_GOPTS => '|@=s@',   # Getopt options for AT_FILE
+    AT_FILE_EOL => 'fromeol',   # file, EOL separated (platform-specific)
+    AT_FILE_EOL_GOPTS => '=s@', # Getopt options
     DO_GLOB => 'glob',
     LEAVES_ONLY => 'leaf',
     SORT_OPT_REVERSE => 'r',
@@ -76,6 +77,12 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     SORTFIELD => 'sortfield',   # which field of the stat structure to sort on
     SORTDIR => 'sortdir',       # default order: 1 for asc; -1 for desc
     GLOBS => 'globs',           # list ref of the globs to check
+    ADDL_PATHSPECS => 'fromatfiles',    # items listed in the atfiles
+};
+
+# Known environment variables
+use constant {
+    ENVVAR_ESCAPE => 'LS0_ESCAPE',
 };
 
 # Allowable sort types
@@ -164,6 +171,7 @@ sub sort_results;
     # elements of $lrWorklist, rather than copies.
 
 sub parse_command_line_into;    # takes and modifies hrOpts; modifies @ARGV
+sub read_entries;               # read entries from an atfile
 sub make_worklist;              # takes lrStrings, bIsTop; returns lrWorklist.
 
 # Utility routines
@@ -180,6 +188,8 @@ sub main {
     #print STDERR ("cmdline=>",join("|",@ARGV),"\n") if DEBUG;
     parse_command_line_into \%opts;     # Modifies @ARGV.
 
+    #print Dumper(%opts),"\n";
+
     # Set up for recursive glob: If it has been requested, stash the
     # provided pathspecs to try at each directory we visit.
     # We don't need to stash for non-recursive glob since the
@@ -189,6 +199,12 @@ sub main {
     # Start with what was given on the command line (parse_c_l_into adds
     # '.' to @ARGV if no args were given, so @ARGV is always nonempty here).
     $lrWorklist = make_worklist \@ARGV, true;   # true => top-level args
+
+    # Add the atfiles to the list
+    if(@{$opts{&ADDL_PATHSPECS}}) {
+        my $lrMoreWork = make_worklist $opts{&ADDL_PATHSPECS}, true;
+        push @$lrWorklist, @$lrMoreWork;
+    }
 
     # Do it, Rockapella!
     my @failures;   # which pathspecs we couldn't process
@@ -462,7 +478,11 @@ sub parse_command_line_into {
     %$hrOptsOut = ( &ALL_DOT => false );
     $hrOptsOut->{&ALL_DOT} = false;
     $hrOptsOut->{&MOST_DOT} = false;
-    $hrOptsOut->{&ESCAPE_OUTPUT} = false;
+
+    $hrOptsOut->{&ESCAPE_OUTPUT} =
+        ( exists($ENV{&ENVVAR_ESCAPE}) && length($ENV{&ENVVAR_ESCAPE})>0 );
+        # TODO? set default based on isatty(STDOUT)
+
     $hrOptsOut->{&DIR_AS_DIR} = false;
     #No default for OUTPUT_SEPAR_IS_EOL since it's negatable.
     $hrOptsOut->{&DO_GLOB} = false;
@@ -483,7 +503,7 @@ sub parse_command_line_into {
         DIR_AS_DIR,
         OUTPUT_SEPAR_IS_EOL . OUTPUT_SEPAR_IS_EOL_GOPTS,
         AT_FILE . AT_FILE_GOPTS,
-        AT_FILE_NL . AT_FILE_NL_GOPTS,
+        AT_FILE_EOL . AT_FILE_EOL_GOPTS,
         DO_GLOB,
         LEAVES_ONLY,
         SORT_OPT_REVERSE,
@@ -491,6 +511,7 @@ sub parse_command_line_into {
         SORT_OPT_TIME,
         SORT_OPT_WHICHTIME . SORT_OPT_WHICHTIME_GOPTS,
         SORT_OPT_NOSORT,
+        LIKE_XARGS,
         )
     or pod2usage(2);
 
@@ -528,8 +549,11 @@ sub parse_command_line_into {
 
     # --xargs implies "--from -"
     if($hrOptsOut->{&LIKE_XARGS}) {
-        print STDERR "--xargs not yet implemented.\n";     # DEBUG
-        exit EXIT_PARAM_ERR;
+        if(exists($hrOptsOut->{&AT_FILE})) {
+            push(@{$hrOptsOut->{&AT_FILE}}, "-")
+        } else {
+            $hrOptsOut->{&AT_FILE} = ["-"];
+        }
     }
 
     # --- Sorting options ---
@@ -580,8 +604,10 @@ sub parse_command_line_into {
 
     # Output separator
     $hrOptsOut->{&OUTPUT_SEPAR} = TERM_NULL;     # by default
+
     $hrOptsOut->{&OUTPUT_SEPAR} = TERM_EOL       # if implied or requested
         if ($hrOptsOut->{&ESCAPE_OUTPUT} || $hrOptsOut->{&OUTPUT_SEPAR_IS_EOL});
+
     $hrOptsOut->{&OUTPUT_SEPAR} = TERM_NULL      # but --noeol always wins
         if (defined $hrOptsOut->{&OUTPUT_SEPAR_IS_EOL} &&
             !$hrOptsOut->{&OUTPUT_SEPAR_IS_EOL}) ;
@@ -601,8 +627,49 @@ sub parse_command_line_into {
     #   - check that the specified files are unique (can't list the same
     #       @file twice)
     #   - check that the specified files are readable
-    #   - set binmode on -@ (not on --fromeol
-    # Read the entries
+    #   - set binmode on -@ (not on --fromeol)
+    #   - Read the entries
+
+    my @entries;    # list of all the entries in the atfiles
+
+#    # Check for duplicates
+#    {
+#        my @filenames = (
+#            exists($hrOptsOut->{&AT_FILE}) ? @{$hrOptsOut->{&AT_FILE}} : (),
+#            exists($hrOptsOut->{&AT_FILE_EOL}) ? @{$hrOptsOut->{&AT_FILE_EOL}} : ()
+#        );
+#        my %seen;
+#        my $ok = true;
+#        for my $fn (@filenames) {
+#            if exists($seen{$fn}) {
+#                print STDERR "Filename ", make_printable $fn,
+#                        " listed more than once.\n";
+#                $ok = false;
+#            }
+#            $seen{$fn}=true;
+#        } # foreach $fn
+#
+#        if(!$ok) {
+#            exit EXIT_PARAM_ERR;
+#        }
+#    } #end duplicate-check
+
+    if(exists $hrOptsOut->{&AT_FILE}) {
+        #print STDERR "Have atfiles\n" if DEBUG;
+        #print STDERR $hrOptsOut->{&AT_FILE}, "\n";
+        #print STDERR Dumper(\($hrOptsOut->{&AT_FILE})), "\n";
+        my $lrEntries = read_entries(TERM_NULL, $hrOptsOut->{&AT_FILE});
+        push @entries, @$lrEntries;
+    } #if have -@
+
+    if(exists $hrOptsOut->{&AT_FILE_EOL}) {
+        #print STDERR "Have eol atfiles\n" if DEBUG;
+        my $lrEntries = read_entries(TERM_EOL, $hrOptsOut->{&AT_FILE_EOL});
+        push @entries, @$lrEntries;
+    } #if have --fromeol
+
+    #print STDERR "Entries:\n", Dumper(@entries), "\n" if DEBUG;
+    $hrOptsOut->{&ADDL_PATHSPECS} = \@entries;
 
     # DEBUG
     if($hrOptsOut->{&LEAVES_ONLY}) {
@@ -611,6 +678,43 @@ sub parse_command_line_into {
     }
 
 } # parse_command_line_into()
+
+sub read_entries {
+# takes $sTerm and $lrFilenames; returns $lrEntries.
+    #print STDERR Dumper(@_), "\n";
+    my ($sTerm, $lrFilenames) = @_;
+    #print STDERR Dumper(@$lrFilenames), "\n";
+    my @retval;
+
+    for my $fn (@$lrFilenames) {
+        #print STDERR "$fn\n";
+        my $fh;
+        if($fn eq "-") {    # we already checked that this only
+            #print STDERR "Using stdin\n";
+            $fh = *STDIN;    # occurs once.
+        }
+        elsif(! (-f $fn && -r $fn && -s $fn)) {
+            print STDERR (  # E.g., if someone says -@ <dirname>
+                "Filename ", make_printable($fn),
+                " isn't something I can read names from.\n"
+            );
+            exit EXIT_PARAM_ERR;
+        }
+        elsif(!open($fh, "<:raw", $fn)) {
+            print STDERR    # raw because NULL term
+                "Couldn't open filename ", make_printable $fn, "\n";
+            exit EXIT_PARAM_ERR;
+        }
+
+        local $/;   # Use file-slurp because split() trims trailing separators,
+                    # which <$fh> with $/==$sTerm does not.
+        my $file_contents = <$fh>;
+
+        push(@retval, split($sTerm, $file_contents));
+    } #foreach filename
+
+    return \@retval;
+} # read_entries()
 
 sub make_worklist {
     my $lrStrings = shift;  # May be a reference to an empty list
@@ -623,6 +727,7 @@ sub make_worklist {
     return \@worklist;
 } # make_worklist()
 
+############################################################################
 # Usage manual is below
 
 __END__
@@ -643,7 +748,7 @@ ls0 [options] [--] [pathspecs]
 
 =head1 OPTIONS
 
-=over 4
+=over
 
 =item B<-a>
 
@@ -656,7 +761,9 @@ Also list files beginning with a '.', except for '.' and '..'
 =item B<-b>, B<--escape>
 
 Print octal escapes for special characters and backslashes.  Implies B<--eol>
-(newline separators); also specify B<--noeol> if you still want null terminators.
+(newline separators); also specify B<--noeol> if you still want null
+terminators.  Can be used as default by setting environment variable
+C<LS0_ESCAPE> (see below).
 
 =item B<-d>
 
@@ -668,23 +775,20 @@ Can't be used with B<--rglob>.
 Separate output entries with a platform-specific end-of-line sequence
 rather than a NULL.  May be useful with B<-b> or B<--glob>.
 
-=item B<< --from [argfile] >> (or B<< -@ [argfile] >>)
+=item B<< --from <argfile> >> (or B<< -@ <argfile> >>)
 
-Read the pathspecs to be processed from B<argfile>, or from standard input
-if no B<argfile> is specified.  Each pathspec in B<argfile>should
+Read the pathspecs to be processed from B<argfile>; specify "-" to read from
+standard input.  Each pathspec in B<argfile>should
 be separated by a NULL terminator ('\0').  This is ls_0_, after all.
 The input is read in binary mode, so filenames can contain any non-NULL
 character.
 
 See L</"Reading argfiles"> for details.
 
-=item B<< --fromeol [argfile] >>
+=item B<< --fromeol <argfile> >>
 
-As B<--from>, but each pathspec in B<argfile> (or standard input, by default)
-should be separated by a platform-specific end-of-line
-(C<\r>, C<\n>, or C<\r\n>).  B<CAUTION:> B<--fromeol> does not unescape any
-characters.  If you use this, make sure the filenames in B<argfile> don't
-contain end-of-line or end-of-file characters.
+As B<--from>, but each pathspec in B<argfile>
+should be separated by a platform-specific end-of-line.
 
 See L</"Reading argfiles"> for details.
 
@@ -699,6 +803,11 @@ globbing before ls0 sees them.
 
 Only list leaves, i.e., files plus directories for which no lower-level files
 are being listed.
+
+=item B<--noescape>
+
+Don't escape.  Used to override the effect of environment variable
+C<LS0_ESCAPE>.  Not yet implemented.
 
 =item B<-r>
 
@@ -742,18 +851,28 @@ can handle.
 
 =back
 
+=head2 Environment variables
+
+=over
+
+=item C<LS0_ESCAPE>
+
+When set to a nonempty value, ls0 will escape (-b) by default.  Override with
+B<--noescape>, once that's implemented.
+
+=back
+
 =head2 Reading argfiles
 
 The B<--from> and B<--fromeol> options read argfiles and treat entries in those
 files as if those entries had been specified on the command line.  Things to
 bear in mind:
 
-=over 4
+=over
 
 =item *
 
-The filename C<->, as well as an omitted argfile name, refers to standard
-input.
+The filename C<-> refers to standard input.
 
 =item *
 
@@ -766,13 +885,24 @@ You B<shall not> make any assumptions about the relative order of items
 listed on the command line or in argfiles.  In any case, the output order is
 controlled only by any sorting options you provide.
 
+=item *
+B<--fromeol> does not unescape any
+characters.  If you use this, make sure the filenames in B<argfile> don't
+contain end-of-line characters.
+
+=item *
+B<--fromeol> uses the platform-specific newline sequence, e.g.,
+C<\r>, C<\n>, or C<\r\n>.  If you try to read
+DOS text files on a UNIX ls0, the input entries will have extra "\r"
+characters at the end of them.
+
 =back
 
 =head1 DIFFERENCES BETWEEN GNU ls(1) and ls0(1)
 
 =head2 New Features
 
-=over 4
+=over
 
 =item B<< --from <argfile> >>, B<< --fromeol <argfile> >>
 
@@ -797,7 +927,7 @@ Only list leaves.
 
 The following GNU ls(1) options are not supported by ls0:
 
-=over 4
+=over
 
 =item B<-1> (print single line), B<-C> (list down columns), B<-m> (comma-separated output), B<-x> (list across rows), B<--format>
 
