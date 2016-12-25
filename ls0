@@ -324,6 +324,7 @@ sub process_worklist_item {
 
     if(!$fileinfo) {
         push @$lrFailures, "Could not stat $item_text";
+        $wli->suppress;     # dont' display it, since it's not actually there!
         return;
     }
 
@@ -519,13 +520,6 @@ sub parse_command_line_into {
     pod2usage(1) if defined $hrOptsOut->{help};
     pod2usage(-verbose => 2) if defined $hrOptsOut->{man};
 
-    # --- If we have no args, process the current dir. ---
-    if(!@ARGV) {
-        push @ARGV, curdir();
-    }
-
-    #print STDERR ("pathspecs=>",join("\n",@ARGV),"\n") if DEBUG;
-
     # --- Process implied options. ---
     # Note: have to use ampersand on &RECURSIVE_GLOB per
     # http://stackoverflow.com/a/96869/2877364 by
@@ -623,36 +617,32 @@ sub parse_command_line_into {
     }
 
     # --- at-files ---
-    # TODO
-    #   - check that the specified files are unique (can't list the same
-    #       @file twice)
-    #   - check that the specified files are readable
-    #   - set binmode on -@ (not on --fromeol)
-    #   - Read the entries
 
-    my @entries;    # list of all the entries in the atfiles
+    # Check for duplicates
+    {
+        my @filenames = (   # all the filenames together
+            exists($hrOptsOut->{&AT_FILE}) ? @{$hrOptsOut->{&AT_FILE}} : (),
+            exists($hrOptsOut->{&AT_FILE_EOL}) ?
+                    @{$hrOptsOut->{&AT_FILE_EOL}} : ()
+        );
+        my %seen;   # which filenames we've seen
+        my $ok = true;
 
-#    # Check for duplicates
-#    {
-#        my @filenames = (
-#            exists($hrOptsOut->{&AT_FILE}) ? @{$hrOptsOut->{&AT_FILE}} : (),
-#            exists($hrOptsOut->{&AT_FILE_EOL}) ? @{$hrOptsOut->{&AT_FILE_EOL}} : ()
-#        );
-#        my %seen;
-#        my $ok = true;
-#        for my $fn (@filenames) {
-#            if exists($seen{$fn}) {
-#                print STDERR "Filename ", make_printable $fn,
-#                        " listed more than once.\n";
-#                $ok = false;
-#            }
-#            $seen{$fn}=true;
-#        } # foreach $fn
-#
-#        if(!$ok) {
-#            exit EXIT_PARAM_ERR;
-#        }
-#    } #end duplicate-check
+        for my $fn (@filenames) {
+            if(exists $seen{$fn}) {
+                print STDERR "Filename ", make_printable($fn),
+                        " listed more than once.\n";
+                $ok = false;
+            }
+            $seen{$fn}=true;
+        } # foreach $fn
+
+        if(!$ok) {
+            exit EXIT_PARAM_ERR;
+        }
+    } #end duplicate-check
+
+    my @entries;    # list of all the pathspecs in the atfiles
 
     if(exists $hrOptsOut->{&AT_FILE}) {
         #print STDERR "Have atfiles\n" if DEBUG;
@@ -660,13 +650,13 @@ sub parse_command_line_into {
         #print STDERR Dumper(\($hrOptsOut->{&AT_FILE})), "\n";
         my $lrEntries = read_entries(TERM_NULL, $hrOptsOut->{&AT_FILE});
         push @entries, @$lrEntries;
-    } #if have -@
+    } # endif --from
 
     if(exists $hrOptsOut->{&AT_FILE_EOL}) {
         #print STDERR "Have eol atfiles\n" if DEBUG;
         my $lrEntries = read_entries(TERM_EOL, $hrOptsOut->{&AT_FILE_EOL});
         push @entries, @$lrEntries;
-    } #if have --fromeol
+    } # endif --fromeol
 
     #print STDERR "Entries:\n", Dumper(@entries), "\n" if DEBUG;
     $hrOptsOut->{&ADDL_PATHSPECS} = \@entries;
@@ -676,6 +666,13 @@ sub parse_command_line_into {
         print STDERR "--leaf not yet implemented.\n";     # DEBUG
         exit EXIT_PARAM_ERR;
     }
+
+    # --- If we have no args or atfiles, process the current dir. ---
+    if(!@ARGV && !@entries) {
+        push @ARGV, curdir();
+    }
+
+    #print STDERR ("pathspecs=>",join("\n",@ARGV),"\n") if DEBUG;
 
 } # parse_command_line_into()
 
@@ -693,7 +690,7 @@ sub read_entries {
             #print STDERR "Using stdin\n";
             $fh = *STDIN;    # occurs once.
         }
-        elsif(! (-f $fn && -r $fn && -s $fn)) {
+        elsif(! (-f $fn && -r _ && -s _)) {
             print STDERR (  # E.g., if someone says -@ <dirname>
                 "Filename ", make_printable($fn),
                 " isn't something I can read names from.\n"
