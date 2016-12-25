@@ -31,7 +31,7 @@ use Data::Dumper;
 #use Class::Struct;
 
 # --- Constants ---
-use constant DEBUG => 1;
+use constant DEBUG => true;
 
 use constant {          # shell exit codes
     EXIT_OK => 0,          # success
@@ -153,12 +153,15 @@ package Worklist_Item {
 } # Worklist_Item
 
 # --- Forward declarations ---
+
+# Do the work
 sub process_worklist;
     # takes hrOpts, lrWorklist, lrOutputWorklist, and lrFailures.
     # Adds to lrOutputWorklist any outputs.  Adds to lrFailures any
     # string error messages.  May modify @$lrWorklist.
     # Returns a bool indicating whether at least one worklist item
     # is to be printed as a result.
+
 sub process_worklist_item;
     # takes (hrOpts, wli, lrFailures, lrAddl [, bDontGlob].
     # Adds to lrAddl any pathspecs needing processing.  This yields a breadth-
@@ -170,6 +173,7 @@ sub sort_results;
     # Per the docs for sort, the result list includes aliases to the
     # elements of $lrWorklist, rather than copies.
 
+# Command-line handling
 sub parse_command_line_into;    # takes and modifies hrOpts; modifies @ARGV
 sub read_entries;               # read entries from an atfile
 sub make_worklist;              # takes lrStrings, bIsTop; returns lrWorklist.
@@ -178,6 +182,7 @@ sub make_worklist;              # takes lrStrings, bIsTop; returns lrWorklist.
 sub make_printable;     # Returns a printable representation of the arg string
 
 # === Main ==============================================================
+
 sub main {
     my %opts;           # everything that controls the behaviour of ls0
     my $lrWorklist;     # what we are being asked to process
@@ -185,10 +190,7 @@ sub main {
     # since we are usually not printing newlines, don't line-buffer STDOUT
     $| = 1;
 
-    #print STDERR ("cmdline=>",join("|",@ARGV),"\n") if DEBUG;
     parse_command_line_into \%opts;     # Modifies @ARGV.
-
-    #print Dumper(%opts),"\n";
 
     # Set up for recursive glob: If it has been requested, stash the
     # provided pathspecs to try at each directory we visit.
@@ -220,9 +222,6 @@ sub main {
         my $sep = $opts{&OUTPUT_SEPAR};
         my $esc = $opts{&ESCAPE_OUTPUT};
 
-        #print STDERR "Before: " . Dumper($lrWorklist) . "\n" if DEBUG;
-        #print STDERR "Sorted: " . Dumper($lrSortedWorklist) . "\n" if DEBUG;
-
         for my Worklist_Item $wli (@$lrSortedWorklist) {
             # skip ones we cleared
             next unless $wli->{visible};
@@ -231,7 +230,6 @@ sub main {
             $wli->text(make_printable ($wli->text =~ s|^./||r)) if $esc;
                 # like ls(1), don't start with "./"  ^^^^^^^^
 
-            #print "=> " if DEBUG;
             print $wli->text, $sep;
         } # next $result
     } # endif any results
@@ -264,7 +262,6 @@ sub process_worklist {
 
     my $done = false;
     while(!$done) {
-        #print STDERR "**Iter (" . scalar @$lrWorklist . " items)\n" if DEBUG;
         @addl = ();     # always start fresh
 
         for my Worklist_Item $wli (@$lrWorklist) {
@@ -279,15 +276,12 @@ sub process_worklist {
         # case @ARGV is a long list from an xargs --- we don't want to
         # copy it, just in case.
         if($lrWorklist != $lrOutputWorklist) {
-            #print STDERR "Adding ", scalar @$lrWorklist, " to ",
-            #    scalar @$lrOutputWorklist, " entries.\n" if DEBUG;
             push @$lrOutputWorklist, @$lrWorklist;
         }
 
         # Set up for the next iteration
         $lrWorklist = make_worklist \@addl;
         $done = !@addl;
-        #print STDERR "Made worklist of " . scalar @addl . " items\n" if DEBUG;
 
     } # while !$done
 
@@ -361,8 +355,6 @@ sub process_worklist_item {
     #    if DEBUG;
 
     if(S_ISDIR($fileinfo->mode)) {
-        #print STDERR "  is directory\n" if DEBUG;
-
         # Figure out what to do
 
         my $bShouldSuppress = !$isWanted;   # by default, just list it as a
@@ -383,12 +375,10 @@ sub process_worklist_item {
 
         # --- Now that we've figured out what to do, go do it. ---
         if($bShouldSuppress) {
-            #print STDERR "    suppressing\n" if DEBUG;
             $wli->suppress;
         }
 
         if($bShouldDescend) {
-            #print STDERR "    recursing\n" if DEBUG;
             my $dirh;
             if(!opendir($dirh, $item_text)) {
                 push @$lrFailures, "Could not read directory $item_text";
@@ -403,9 +393,7 @@ sub process_worklist_item {
         } # endif recursing
 
     } else {    # not a directory - treat files, pipes, links, &c. all as files
-        #print STDERR "  is file\n" if DEBUG;
         if(!$isWanted) {        # Drop dotfiles unless requested
-            #print STDERR "    suppressing\n" if DEBUG;
             $wli->suppress;
         }
     } #endif is a directory else
@@ -423,18 +411,12 @@ sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
     $direction *= $hrOpts->{&SORTDIR};
         # Take into account the default order for this sort type
 
-    #print STDERR "In: " . Dumper($lrWorklist) . "\n" if DEBUG;
-    #print STDERR "Direction=" . $direction . ", sort=" . $hrOpts->{&SORT} .
-    #    ".\n" if DEBUG;
-
     if($sort_type eq SORT_BY_NONE) {
-        #print STDERR "Unsorted\n" if DEBUG;
         return $lrWorklist;     # *** EXIT POINT ***
     }
 
     # Sort
     if($sort_type eq SORT_BY_NAME) {
-        #print STDERR "Name-sort\n" if DEBUG;
         @sorted = sort
             { $direction * ($a->text cmp $b->text) }
             @$lrWorklist;   # NOTE: sort on byte values, not characters.
@@ -476,9 +458,10 @@ sub parse_command_line_into {
     Getopt::Long::Configure 'gnu_getopt';
 
     # Set defaults so we don't have to test them with exists().
-    %$hrOptsOut = ( &ALL_DOT => false );
-    $hrOptsOut->{&ALL_DOT} = false;
-    $hrOptsOut->{&MOST_DOT} = false;
+    %$hrOptsOut = (
+        &ALL_DOT => false,
+        &MOST_DOT => false,
+    );
 
     $hrOptsOut->{&ESCAPE_OUTPUT} =
         ( exists($ENV{&ENVVAR_ESCAPE}) && length($ENV{&ENVVAR_ESCAPE})>0 );
@@ -612,7 +595,13 @@ sub parse_command_line_into {
 
     # Globbing
     if($hrOptsOut->{&RECURSIVE_GLOB} || $hrOptsOut->{&DO_GLOB}) {
-        print STDERR "Globbing not yet implemented.\n";     # DEBUG
+        print STDERR "Globbing not yet implemented.\n";     # TODO
+        exit EXIT_PARAM_ERR;
+    }
+
+    # Leaves-only mode
+    if($hrOptsOut->{&LEAVES_ONLY}) {
+        print STDERR "--leaf not yet implemented.\n";       # TODO
         exit EXIT_PARAM_ERR;
     }
 
@@ -645,34 +634,21 @@ sub parse_command_line_into {
     my @entries;    # list of all the pathspecs in the atfiles
 
     if(exists $hrOptsOut->{&AT_FILE}) {
-        #print STDERR "Have atfiles\n" if DEBUG;
-        #print STDERR $hrOptsOut->{&AT_FILE}, "\n";
-        #print STDERR Dumper(\($hrOptsOut->{&AT_FILE})), "\n";
         my $lrEntries = read_entries(TERM_NULL, $hrOptsOut->{&AT_FILE});
         push @entries, @$lrEntries;
     } # endif --from
 
     if(exists $hrOptsOut->{&AT_FILE_EOL}) {
-        #print STDERR "Have eol atfiles\n" if DEBUG;
         my $lrEntries = read_entries(TERM_EOL, $hrOptsOut->{&AT_FILE_EOL});
         push @entries, @$lrEntries;
     } # endif --fromeol
 
-    #print STDERR "Entries:\n", Dumper(@entries), "\n" if DEBUG;
     $hrOptsOut->{&ADDL_PATHSPECS} = \@entries;
-
-    # DEBUG
-    if($hrOptsOut->{&LEAVES_ONLY}) {
-        print STDERR "--leaf not yet implemented.\n";     # DEBUG
-        exit EXIT_PARAM_ERR;
-    }
 
     # --- If we have no args or atfiles, process the current dir. ---
     if(!@ARGV && !@entries) {
         push @ARGV, curdir();
     }
-
-    #print STDERR ("pathspecs=>",join("\n",@ARGV),"\n") if DEBUG;
 
 } # parse_command_line_into()
 
