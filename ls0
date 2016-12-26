@@ -63,6 +63,7 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     SORT_OPT_REVERSE => 'r',
     RECURSE => 'R',
     RECURSIVE_GLOB => 'rglob',
+    SORT_OPT_SIZE => 'S',
     SORT_OPT_TIME => 't',           # Sort on some time (mtime by default)
     SORT_OPT_WHICHTIME => 'time',   # Which time to sort on
     SORT_OPT_WHICHTIME_GOPTS => '=s',
@@ -89,10 +90,9 @@ use constant {
 use constant {
     SORT_BY_NONE => 'none',
     SORT_BY_NAME => 'name',     # a-z unless reverse.  Default.
-    SORT_BY_TEXT => 'text',     # A textual sort on stat->$sortfield
-    SORT_BY_NUM => 'num',       # Ditto, but numeric
     #SORT_BY_EXT => 'ext',       # extension
-    #SORT_BY_TIME => 'time',     # newest first unless reverse
+    SORT_BY_NUM => 'num',       # A numeric sort on stat->$sortfield
+        # defaults: times newest first; size largest first
     #SORT_BY_SIZE => 'size',     # largest first unless reverse
     #SORT_BY_VER => 'ver',      # version within a filename.
         # Per https://www.gnu.org/software/coreutils/manual/html_node/Details-about-version-sort.html
@@ -419,14 +419,14 @@ sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
     if($sort_type eq SORT_BY_NAME) {
         @sorted = sort
             { $direction * ($a->text cmp $b->text) }
-            @$lrWorklist;   # NOTE: sort on byte values, not characters.
+            @$lrWorklist;   # Note: sort on byte values, not characters.
 
     } elsif($sort_type eq SORT_BY_NUM) {
         my $fld = $hrOpts->{&SORTFIELD};
         #print STDERR "Numeric sort on ", $fld, "\n" if DEBUG;
         @sorted = sort
             { $direction * ($a->{stat}->$fld() <=> $b->{stat}->$fld()) }
-            @$lrWorklist;   # NOTE: sort on byte values, not characters.
+            @$lrWorklist;
 
     } else {
         die "Unsupported sort type $sort_type\n";   # TODO
@@ -461,22 +461,22 @@ sub parse_command_line_into {
     %$hrOptsOut = (
         &ALL_DOT => false,
         &MOST_DOT => false,
+        &DIR_AS_DIR => false,
+        #No default for OUTPUT_SEPAR_IS_EOL since it's negatable.
+        &DO_GLOB => false,
+        &LEAVES_ONLY => false,
+        &SORT_OPT_REVERSE => false,
+        &RECURSE => false,
+        &SORT_OPT_SIZE => false,
+        &SORT_OPT_TIME => false,
+        &SORT_OPT_WHICHTIME => SORTFIELD_MTIME,
+        &SORT_OPT_NOSORT => false,
+        &LIKE_XARGS => false,
     );
 
     $hrOptsOut->{&ESCAPE_OUTPUT} =
         ( exists($ENV{&ENVVAR_ESCAPE}) && length($ENV{&ENVVAR_ESCAPE})>0 );
         # TODO? set default based on isatty(STDOUT)
-
-    $hrOptsOut->{&DIR_AS_DIR} = false;
-    #No default for OUTPUT_SEPAR_IS_EOL since it's negatable.
-    $hrOptsOut->{&DO_GLOB} = false;
-    $hrOptsOut->{&LEAVES_ONLY} = false;
-    $hrOptsOut->{&SORT_OPT_REVERSE} = false;
-    $hrOptsOut->{&RECURSE} = false;
-    $hrOptsOut->{&SORT_OPT_TIME} = false;
-    $hrOptsOut->{&SORT_OPT_WHICHTIME} = SORTFIELD_MTIME;
-    $hrOptsOut->{&SORT_OPT_NOSORT} = false;
-    $hrOptsOut->{&LIKE_XARGS} = false;
 
     # Get options
     GetOptions($hrOptsOut,  # destination hash
@@ -492,6 +492,7 @@ sub parse_command_line_into {
         LEAVES_ONLY,
         SORT_OPT_REVERSE,
         RECURSE,
+        SORT_OPT_SIZE,
         SORT_OPT_TIME,
         SORT_OPT_WHICHTIME . SORT_OPT_WHICHTIME_GOPTS,
         SORT_OPT_NOSORT,
@@ -545,8 +546,15 @@ sub parse_command_line_into {
         exit EXIT_PARAM_ERR;
     }
 
+    # TODO report illegal combinations, e.g., -S -t
+
     if($hrOptsOut->{&SORT_OPT_NOSORT}) {
         $hrOptsOut->{&SORT} = SORT_BY_NONE;
+
+    } elsif($hrOptsOut->{&SORT_OPT_SIZE}) {
+        $hrOptsOut->{&SORT} = SORT_BY_NUM;
+        $hrOptsOut->{&SORTDIR} = -1;    # descending by default
+        $hrOptsOut->{&SORTFIELD} = "size";
 
     } elsif($hrOptsOut->{&SORT_OPT_TIME}) {
         $hrOptsOut->{&SORT} = SORT_BY_NUM;
@@ -588,10 +596,6 @@ sub parse_command_line_into {
     $hrOptsOut->{&OUTPUT_SEPAR} = TERM_NULL      # but --noeol always wins
         if (defined $hrOptsOut->{&OUTPUT_SEPAR_IS_EOL} &&
             !$hrOptsOut->{&OUTPUT_SEPAR_IS_EOL}) ;
-
-    # How many args?  This is a special case: don't print the arg name
-    # if it was the only arg and was a directory.
-    $hrOptsOut->{&ONE_ARG} = (scalar @ARGV == 1);
 
     # Globbing
     if($hrOptsOut->{&RECURSIVE_GLOB} || $hrOptsOut->{&DO_GLOB}) {
@@ -646,9 +650,16 @@ sub parse_command_line_into {
     $hrOptsOut->{&ADDL_PATHSPECS} = \@entries;
 
     # --- If we have no args or atfiles, process the current dir. ---
-    if(!@ARGV && !@entries) {
+    # If atfiles were specified, don't add cwd even if the atfiles
+    # didn't include any pathspecs.
+    unless(@ARGV || exists $hrOptsOut->{&AT_FILE} ||
+            exists $hrOptsOut->{&AT_FILE_EOL}) {
         push @ARGV, curdir();
     }
+
+    # How many args?  This is a special case: don't print the arg name
+    # if it was the only arg and was a directory.
+    $hrOptsOut->{&ONE_ARG} = (scalar @ARGV == 1);
 
 } # parse_command_line_into()
 
@@ -717,7 +728,8 @@ ls0 - List filenames, with each output null-terminated.
 
 ls0 [options] [--] [pathspecs]
 
-(Run ls0 --help for options, or ls0 --man for full documentation)
+If no pathspecs or atfiles are given, list non-dotfiles in the current
+directory.  Run ls0 --help for options, or ls0 --man for full documentation.
 
 =head1 OPTIONS
 
@@ -795,6 +807,10 @@ Visit subdirectories recursively.  No effect if B<-d> is specified.
 Glob in ls0 rather than (or in addition to) in the shell.  Try to glob
 the pathspecs given on the command line in each directory visited.
 Implies B<-R> and B<--glob>.  Can't be used with B<-d>.
+
+=item B<-S>
+
+Sort by file size, descending by default.
 
 =item B<-t>
 
