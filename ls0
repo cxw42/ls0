@@ -1,6 +1,7 @@
 #!/usr/bin/env perl
 # ls0: A "ls" replacement that null-terminates its output filenames.
 # To see the output on the console, pipe it to cat -A.  Nulls show as ^@.
+# XXX marks features to be implemented; TODO marks other items to do.
 
 # Style note: Hungarian prefixes are used on scalars:
 #   "hr" (hash ref), "lr" (list ref), "sr" (string ref), "nr" (numeric ref),
@@ -63,6 +64,7 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     SORT_OPT_REVERSE => 'r',
     RECURSE => 'R',
     RECURSIVE_GLOB => 'rglob',
+    SORT_NAME => 'sort', SORT_NAME_GOPTS => '=s',
     SORT_OPT_SIZE => 'S',
     SORT_OPT_TIME => 't',           # Sort on some time (mtime by default)
     SORT_OPT_WHICHTIME => 'time',   # Which time to sort on
@@ -74,7 +76,7 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     OUTPUT_SEPAR => 'output_separator',     # \n or \0
     DEPTH => 'depth',
     ONE_ARG => 'one_arg',       # if only one arg provided
-    SORT => 'sort',             # how to sort
+    SORT => 'whichsort',        # how to sort
     SORTFIELD => 'sortfield',   # which field of the stat structure to sort on
     SORTDIR => 'sortdir',       # default order: 1 for asc; -1 for desc
     GLOBS => 'globs',           # list ref of the globs to check
@@ -90,14 +92,12 @@ use constant {
 use constant {
     SORT_BY_NONE => 'none',
     SORT_BY_NAME => 'name',     # a-z unless reverse.  Default.
-    #SORT_BY_EXT => 'ext',       # extension
+    #SORT_BY_EXT => 'ext',       # extension XXX
     SORT_BY_NUM => 'num',       # A numeric sort on stat->$sortfield
         # defaults: times newest first; size largest first
-    #SORT_BY_SIZE => 'size',     # largest first unless reverse
     #SORT_BY_VER => 'ver',      # version within a filename.
-        # Per https://www.gnu.org/software/coreutils/manual/html_node/Details-about-version-sort.html
+        # XXX Per https://www.gnu.org/software/coreutils/manual/html_node/Details-about-version-sort.html
         # TODO support this?  Require the user specify the filename encoding?
-    # TODO atime, ctime
 };
 
 # Names of File::Stat fields we can sort on
@@ -291,7 +291,7 @@ sub process_worklist {
 sub process_worklist_item {
     my ($hrOpts, $wli, $lrFailures, $lrAddl) = @_;
 
-    # TODO implement globs
+    # XXX implement globs
     #my $pathspec = $$srPathspec;
     #
     #if($hrOpts->{&DO_GLOB} && !bDontGlob) {
@@ -306,8 +306,8 @@ sub process_worklist_item {
     #    } else {
     #        $pathspec = $results[0];
     #            # If it was a single file, process it now.
-    #            # TODO track whether pathspecs came from glob and don't
-    #            # re-glob them?
+    #            # XXX track whether pathspecs came from glob and don't
+    #            # re-glob them
     #    }
     #} # endif DO_GLOB
 
@@ -490,6 +490,7 @@ sub parse_command_line_into {
         AT_FILE_EOL . AT_FILE_EOL_GOPTS,
         DO_GLOB,
         LEAVES_ONLY,
+        SORT_NAME . SORT_NAME_GOPTS,
         SORT_OPT_REVERSE,
         RECURSE,
         SORT_OPT_SIZE,
@@ -535,7 +536,27 @@ sub parse_command_line_into {
     }
 
     # --- Sorting options ---
-    # TODO expand to support other sorts
+    # XXX expand to support other sorts
+
+    # Collapse --sort to the equivalent - options
+    if(exists $hrOptsOut->{&SORT_NAME}) {
+        if($hrOptsOut->{&SORT_NAME} eq "none") {
+            $hrOptsOut->{&SORT_OPT_NOSORT} = true;
+        } elsif ($hrOptsOut->{&SORT_NAME} eq "extension") {
+            print STDERR "--sort=extension not yet supported.\n"; #XXX
+            exit EXIT_PARAM_ERR;
+        } elsif ($hrOptsOut->{&SORT_NAME} eq "size") {
+            $hrOptsOut->{&SORT_OPT_SIZE} = true;
+        } elsif ($hrOptsOut->{&SORT_NAME} eq "time") {
+            $hrOptsOut->{&SORT_OPT_TIME} = true;
+        } elsif ($hrOptsOut->{&SORT_NAME} eq "version") {
+            print STDERR "--sort=version not yet supported.\n"; #XXX
+            exit EXIT_PARAM_ERR;
+        } else {
+            print STDERR "Unknown --sort name\n";
+            exit EXIT_PARAM_ERR;
+        }
+    } #endif --sort specified
 
     # Sanity checks.  First, -U prohibits all other sorting options.
     if($hrOptsOut->{&SORT_OPT_NOSORT} && (
@@ -546,8 +567,20 @@ sub parse_command_line_into {
         exit EXIT_PARAM_ERR;
     }
 
-    # TODO report illegal combinations, e.g., -S -t
+    {   # Second, did the user ask for more than one sort?
+        my @sorts;
+        push(@sorts,SORT_OPT_SIZE) if $hrOptsOut->{&SORT_OPT_SIZE};
+        push(@sorts,SORT_OPT_TIME) if $hrOptsOut->{&SORT_OPT_TIME};
+        push(@sorts,SORT_OPT_NOSORT) if $hrOptsOut->{&SORT_OPT_NOSORT};
 
+        if(@sorts > 1) {
+            print "I can't sort by multiple keys (",
+                join(" ", map { '-' . $_} @sorts), ").\n";
+            exit EXIT_PARAM_ERR;
+        }
+    } # end multi-sort check
+
+    # Fill in the internal variables for each sort
     if($hrOptsOut->{&SORT_OPT_NOSORT}) {
         $hrOptsOut->{&SORT} = SORT_BY_NONE;
 
@@ -599,20 +632,19 @@ sub parse_command_line_into {
 
     # Globbing
     if($hrOptsOut->{&RECURSIVE_GLOB} || $hrOptsOut->{&DO_GLOB}) {
-        print STDERR "Globbing not yet implemented.\n";     # TODO
+        print STDERR "Globbing not yet implemented.\n";     # XXX
         exit EXIT_PARAM_ERR;
     }
 
     # Leaves-only mode
     if($hrOptsOut->{&LEAVES_ONLY}) {
-        print STDERR "--leaf not yet implemented.\n";       # TODO
+        print STDERR "--leaf not yet implemented.\n";       # XXX
         exit EXIT_PARAM_ERR;
     }
 
     # --- at-files ---
 
-    # Check for duplicates
-    {
+    { # Check for duplicates
         my @filenames = (   # all the filenames together
             exists($hrOptsOut->{&AT_FILE}) ? @{$hrOptsOut->{&AT_FILE}} : (),
             exists($hrOptsOut->{&AT_FILE_EOL}) ?
@@ -635,19 +667,21 @@ sub parse_command_line_into {
         }
     } #end duplicate-check
 
-    my @entries;    # list of all the pathspecs in the atfiles
+    { # read atfiles
+        my @entries;    # list of all the pathspecs in the atfiles
 
-    if(exists $hrOptsOut->{&AT_FILE}) {
-        my $lrEntries = read_entries(TERM_NULL, $hrOptsOut->{&AT_FILE});
-        push @entries, @$lrEntries;
-    } # endif --from
+        if(exists $hrOptsOut->{&AT_FILE}) {
+            my $lrEntries = read_entries(TERM_NULL, $hrOptsOut->{&AT_FILE});
+            push @entries, @$lrEntries;
+        } # endif --from
 
-    if(exists $hrOptsOut->{&AT_FILE_EOL}) {
-        my $lrEntries = read_entries(TERM_EOL, $hrOptsOut->{&AT_FILE_EOL});
-        push @entries, @$lrEntries;
-    } # endif --fromeol
+        if(exists $hrOptsOut->{&AT_FILE_EOL}) {
+            my $lrEntries = read_entries(TERM_EOL, $hrOptsOut->{&AT_FILE_EOL});
+            push @entries, @$lrEntries;
+        } # endif --fromeol
 
-    $hrOptsOut->{&ADDL_PATHSPECS} = \@entries;
+        $hrOptsOut->{&ADDL_PATHSPECS} = \@entries;
+    } #end read atfiles
 
     # --- If we have no args or atfiles, process the current dir. ---
     # If atfiles were specified, don't add cwd even if the atfiles
