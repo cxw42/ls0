@@ -52,40 +52,44 @@ use constant RE_DOT_OR_DOTDOT => qr/^\.{1,2}$/;
 use constant {  # *_GOPTS are additional parameters for Getopt::Long
     ALL_DOT => 'a',
     MOST_DOT => 'A',
-    ESCAPE_OUTPUT => 'b', ESCAPE_OUTPUT_GOPTS => '|escape',
+    ESCAPE_OUTPUT_ONECHAR => 'b',
     DIR_AS_DIR => 'd',
-    OUTPUT_SEPAR_IS_EOL => 'eol', OUTPUT_SEPAR_IS_EOL_GOPTS => '!',
-    AT_FILE => 'from',          # file listing other inputs, NULL separated.
-    AT_FILE_GOPTS => '|@=s@',   # Getopt options for AT_FILE
-    AT_FILE_EOL => 'fromeol',   # file, EOL separated (platform-specific)
-    AT_FILE_EOL_GOPTS => '=s@', # Getopt options
+    OUTPUT_TERM_IS_EOL => 'eol', OUTPUT_TERM_IS_EOL_GOPTS => '!',
+        # terminator for each entry, including the last
+    ESCAPE_OUTPUT => 'escape', ESCAPE_OUTPUT_GOPTS => '!',
+
+    # "atfiles": Files listing other inputs.
+    AT_FILE => 'from',          # Atfile, NULL separated.
+    AT_FILE_GOPTS => '|@=s@',
+    AT_FILE_EOL => 'fromeol',   # Atfile, EOL separated (platform-specific)
+    AT_FILE_EOL_GOPTS => '=s@',
+
     DO_GLOB => 'glob',
     LEAVES_ONLY => 'leaf',
     SORT_OPT_REVERSE => 'r',
     RECURSE => 'R',
     RECURSIVE_GLOB => 'rglob',
+
     SORT_NAME => 'sort', SORT_NAME_GOPTS => '=s',
     SORT_OPT_SIZE => 'S',
     SORT_OPT_TIME => 't',           # Sort on some time (mtime by default)
     SORT_OPT_WHICHTIME => 'time',   # Which time to sort on
     SORT_OPT_WHICHTIME_GOPTS => '=s',
     SORT_OPT_NOSORT => 'U',
+
     LIKE_XARGS => "xargs",
 
     # Other options not specified on the command line, but included in the hash
-    OUTPUT_SEPAR => 'output_separator',     # \n or \0
+    SHOULD_ESCAPE => 'should_escape',       # Internal: whether or not to escape
+    OUTPUT_TERM => 'output_terminator',     # \n or \0
     DEPTH => 'depth',
     ONE_ARG => 'one_arg',       # if only one arg provided
     SORT => 'whichsort',        # how to sort
     SORTFIELD => 'sortfield',   # which field of the stat structure to sort on
     SORTDIR => 'sortdir',       # default order: 1 for asc; -1 for desc
     GLOBS => 'globs',           # list ref of the globs to check
-    ADDL_PATHSPECS => 'fromatfiles',    # items listed in the atfiles
-};
 
-# Known environment variables
-use constant {
-    ENVVAR_ESCAPE => 'LS0_ESCAPE',
+    ADDL_PATHSPECS => 'fromatfiles',    # items listed in the atfiles
 };
 
 # Allowable sort types
@@ -219,8 +223,8 @@ sub main {
         my $lrSortedWorklist = sort_results(\%opts, $lrWorklist);
 
         # Dump the (possibly escaped) results
-        my $sep = $opts{&OUTPUT_SEPAR};
-        my $esc = $opts{&ESCAPE_OUTPUT};
+        my $trm = $opts{&OUTPUT_TERM};
+        my $esc = $opts{&SHOULD_ESCAPE};
 
         for my Worklist_Item $wli (@$lrSortedWorklist) {
             # skip ones we cleared
@@ -230,7 +234,7 @@ sub main {
             $wli->text(make_printable ($wli->text =~ s|^./||r)) if $esc;
                 # like ls(1), don't start with "./"  ^^^^^^^^
 
-            print $wli->text, $sep;
+            print $wli->text, $trm;
         } # next $result
     } # endif any results
 
@@ -327,8 +331,8 @@ sub process_worklist_item {
     my ($basename, $dirs) = fileparse($item_text);
         # Don't use splitpath(), which chokes on '.git/.'.
 
-    #print STDERR "Processing $item_text (basename  -$basename-, dir -$dirs-)\n"
-    #    if DEBUG;
+#    print STDERR "Processing $item_text (basename  -$basename-, dir -$dirs-)\n"
+#        if DEBUG;
 
     # Shorthand for the context
     my $all_dot = $hrOpts->{&ALL_DOT};
@@ -347,12 +351,17 @@ sub process_worklist_item {
     my $isWanted = (    # dotfile-based filtering
         (!$isDotfile) ||                    # not a dotfile
         ($all_dot) ||                       # -a: keep dotfiles
-        ($most_dot && !($isD || $isDD))     # -A: keep except . and ..
-    );
+        ($most_dot && !($isD || $isDD)) ||  # -A: keep except . and ..
+        ($isTop)                            # always list what the user
+    );                                      # expressly asked for.
+        # Note: $isTop is set for command-line args and for atfile entries.
 
-    #print STDERR "  -a $all_dot  -A $most_dot  -d $dash_d  -R $recursive ".
-    #    "top $isTop  one_arg $one_arg  . $isD  .. $isDD  .* $isDotfile\n"
-    #    if DEBUG;
+#    print STDERR "  -a $all_dot  -A $most_dot  -d $dash_d  -R $recursive ".
+#        "top $isTop  one_arg $one_arg  . $isD  .. $isDD  .* $isDotfile  " .
+#        "wanted $isWanted\n"
+#        if DEBUG;
+#    print STDERR "  is dir \n" if DEBUG &&  S_ISDIR($fileinfo->mode);
+#    print STDERR "  is file\n" if DEBUG && !S_ISDIR($fileinfo->mode);
 
     if(S_ISDIR($fileinfo->mode)) {
         # Figure out what to do
@@ -363,8 +372,10 @@ sub process_worklist_item {
         # A top-level arg:
         #   Print it unless only one was given (e.g., for "ls ..")
         #   Descend unless -d.  -R is irrelevant because we descend by default.
+        #   ** However, if only one arg is given and -d, do list it,
+        #      since that's exactly the one thing the user wanted to see.
         if( $isTop ) {
-            $bShouldSuppress = $one_arg;
+            $bShouldSuppress = ($one_arg && !$dash_d);
             $bShouldDescend = !$dash_d;
         }
 
@@ -394,10 +405,12 @@ sub process_worklist_item {
 
     } else {    # not a directory - treat files, pipes, links, &c. all as files
         if(!$isWanted) {        # Drop dotfiles unless requested
+#            print STDERR "  suppressing\n" if DEBUG;
             $wli->suppress;
         }
     } #endif is a directory else
 
+#    print STDERR "  visible ", $wli->{visible}, "\n" if DEBUG;
     return $wli->{visible};
 } # process_worklist_item()
 
@@ -454,6 +467,10 @@ sub parse_command_line_into {
 
     my $hrOptsOut = shift;
 
+    # Easier syntax for checking whether optional args were provided.
+    # Syntax thanks to http://www.perlmonks.org/?node_id=696592
+    local *have = sub { return exists($hrOptsOut->{$_[0]}); };
+
     # --- Parse the options ---
     Getopt::Long::Configure 'gnu_getopt';
 
@@ -461,12 +478,17 @@ sub parse_command_line_into {
     %$hrOptsOut = (
         &ALL_DOT => false,
         &MOST_DOT => false,
+        #No default for ESCAPE_OUTPUT_ONECHAR so we can tell what the user
+        #asked for.
         &DIR_AS_DIR => false,
-        #No default for OUTPUT_SEPAR_IS_EOL since it's negatable.
+        #No default for OUTPUT_TERM_IS_EOL since it's negatable.
+        #Ditto ESCAPE_OUTPUT, AT_FILE, AT_FILE_EOL
         &DO_GLOB => false,
         &LEAVES_ONLY => false,
         &SORT_OPT_REVERSE => false,
         &RECURSE => false,
+        &RECURSIVE_GLOB => false,
+        #No default for SORT_NAME
         &SORT_OPT_SIZE => false,
         &SORT_OPT_TIME => false,
         &SORT_OPT_WHICHTIME => SORTFIELD_MTIME,
@@ -474,18 +496,15 @@ sub parse_command_line_into {
         &LIKE_XARGS => false,
     );
 
-    $hrOptsOut->{&ESCAPE_OUTPUT} =
-        ( exists($ENV{&ENVVAR_ESCAPE}) && length($ENV{&ENVVAR_ESCAPE})>0 );
-        # TODO? set default based on isatty(STDOUT)
-
     # Get options
     GetOptions($hrOptsOut,  # destination hash
         'help|?', 'man',
         ALL_DOT,
         MOST_DOT,
-        ESCAPE_OUTPUT . ESCAPE_OUTPUT_GOPTS,
+        ESCAPE_OUTPUT_ONECHAR,
         DIR_AS_DIR,
-        OUTPUT_SEPAR_IS_EOL . OUTPUT_SEPAR_IS_EOL_GOPTS,
+        OUTPUT_TERM_IS_EOL . OUTPUT_TERM_IS_EOL_GOPTS,
+        ESCAPE_OUTPUT . ESCAPE_OUTPUT_GOPTS,
         AT_FILE . AT_FILE_GOPTS,
         AT_FILE_EOL . AT_FILE_EOL_GOPTS,
         DO_GLOB,
@@ -493,6 +512,8 @@ sub parse_command_line_into {
         SORT_NAME . SORT_NAME_GOPTS,
         SORT_OPT_REVERSE,
         RECURSE,
+        RECURSIVE_GLOB,
+        SORT_NAME,
         SORT_OPT_SIZE,
         SORT_OPT_TIME,
         SORT_OPT_WHICHTIME . SORT_OPT_WHICHTIME_GOPTS,
@@ -528,7 +549,7 @@ sub parse_command_line_into {
 
     # --xargs implies "--from -"
     if($hrOptsOut->{&LIKE_XARGS}) {
-        if(exists($hrOptsOut->{&AT_FILE})) {
+        if(have(AT_FILE)) {
             push(@{$hrOptsOut->{&AT_FILE}}, "-")
         } else {
             $hrOptsOut->{&AT_FILE} = ["-"];
@@ -539,7 +560,7 @@ sub parse_command_line_into {
     # XXX expand to support other sorts
 
     # Collapse --sort to the equivalent - options
-    if(exists $hrOptsOut->{&SORT_NAME}) {
+    if(have(SORT_NAME)) {
         if($hrOptsOut->{&SORT_NAME} eq "none") {
             $hrOptsOut->{&SORT_OPT_NOSORT} = true;
         } elsif ($hrOptsOut->{&SORT_NAME} eq "extension") {
@@ -620,15 +641,34 @@ sub parse_command_line_into {
 
     # --- Set other internal values based on the provided options ---
 
-    # Output separator
-    $hrOptsOut->{&OUTPUT_SEPAR} = TERM_NULL;     # by default
+    # Handle -b, --escape, --noescape.  --noescape always wins if given.
 
-    $hrOptsOut->{&OUTPUT_SEPAR} = TERM_EOL       # if implied or requested
-        if ($hrOptsOut->{&ESCAPE_OUTPUT} || $hrOptsOut->{&OUTPUT_SEPAR_IS_EOL});
+    if(     have(ESCAPE_OUTPUT) && !$hrOptsOut->{&ESCAPE_OUTPUT}) { #--noescape
+        $hrOptsOut->{&SHOULD_ESCAPE} = false;
 
-    $hrOptsOut->{&OUTPUT_SEPAR} = TERM_NULL      # but --noeol always wins
-        if (defined $hrOptsOut->{&OUTPUT_SEPAR_IS_EOL} &&
-            !$hrOptsOut->{&OUTPUT_SEPAR_IS_EOL}) ;
+    } elsif(have(ESCAPE_OUTPUT) && $hrOptsOut->{&ESCAPE_OUTPUT}) {   #--escape
+        $hrOptsOut->{&SHOULD_ESCAPE} = true;
+
+    } elsif(have(ESCAPE_OUTPUT_ONECHAR) &&                           # -b
+                $hrOptsOut->{&ESCAPE_OUTPUT_ONECHAR}) {
+        $hrOptsOut->{&SHOULD_ESCAPE} = true;
+
+    } else {                    # By default, escape if outputting to a tty.
+        $hrOptsOut->{&SHOULD_ESCAPE} = (-t STDOUT);
+    }
+
+    # Handle --eol, --noeol.  --noeol always wins if given.
+
+    if (    have(OUTPUT_TERM_IS_EOL) && !$hrOptsOut->{&OUTPUT_TERM_IS_EOL}) {
+        $hrOptsOut->{&OUTPUT_TERM} = TERM_NULL;                # --noeol
+
+    } elsif(have(OUTPUT_TERM_IS_EOL) && $hrOptsOut->{&OUTPUT_TERM_IS_EOL}) {
+        $hrOptsOut->{&OUTPUT_TERM} = TERM_EOL;                 # --eol
+
+    } else {                                        # default: EOL if escaping
+        $hrOptsOut->{&OUTPUT_TERM} =
+            $hrOptsOut->{&SHOULD_ESCAPE} ? TERM_EOL : TERM_NULL;
+    }
 
     # Globbing
     if($hrOptsOut->{&RECURSIVE_GLOB} || $hrOptsOut->{&DO_GLOB}) {
@@ -642,13 +682,12 @@ sub parse_command_line_into {
         exit EXIT_PARAM_ERR;
     }
 
-    # --- at-files ---
+    # --- Atfiles ---
 
     { # Check for duplicates
         my @filenames = (   # all the filenames together
-            exists($hrOptsOut->{&AT_FILE}) ? @{$hrOptsOut->{&AT_FILE}} : (),
-            exists($hrOptsOut->{&AT_FILE_EOL}) ?
-                    @{$hrOptsOut->{&AT_FILE_EOL}} : ()
+            have(AT_FILE) ?         @{$hrOptsOut->{&AT_FILE}} :     (),
+            have(AT_FILE_EOL) ?    @{$hrOptsOut->{&AT_FILE_EOL}} : ()
         );
         my %seen;   # which filenames we've seen
         my $ok = true;
@@ -670,12 +709,12 @@ sub parse_command_line_into {
     { # read atfiles
         my @entries;    # list of all the pathspecs in the atfiles
 
-        if(exists $hrOptsOut->{&AT_FILE}) {
+        if(have(AT_FILE)) {
             my $lrEntries = read_entries(TERM_NULL, $hrOptsOut->{&AT_FILE});
             push @entries, @$lrEntries;
         } # endif --from
 
-        if(exists $hrOptsOut->{&AT_FILE_EOL}) {
+        if(have(AT_FILE_EOL)) {
             my $lrEntries = read_entries(TERM_EOL, $hrOptsOut->{&AT_FILE_EOL});
             push @entries, @$lrEntries;
         } # endif --fromeol
@@ -686,8 +725,7 @@ sub parse_command_line_into {
     # --- If we have no args or atfiles, process the current dir. ---
     # If atfiles were specified, don't add cwd even if the atfiles
     # didn't include any pathspecs.
-    unless(@ARGV || exists $hrOptsOut->{&AT_FILE} ||
-            exists $hrOptsOut->{&AT_FILE_EOL}) {
+    unless(@ARGV || have(AT_FILE) || have(AT_FILE_EOL)) {
         push @ARGV, curdir();
     }
 
@@ -777,12 +815,15 @@ Also list files beginning with a '.'
 
 Also list files beginning with a '.', except for '.' and '..'
 
-=item B<-b>, B<--escape>
+=item B<-b>, B<--escape> (disable with B<--noescape>)
 
 Print octal escapes for special characters and backslashes.  Implies B<--eol>
-(newline separators); also specify B<--noeol> if you still want null
-terminators.  Can be used as default by setting environment variable
-C<LS0_ESCAPE> (see below).
+(newline terminators); also specify B<--noeol> if you still want null
+terminators.
+
+By default, output is escaped if standard output is a terminal.
+
+If multiple escaping options are given, B<--noescape> controls (if specified).
 
 =item B<-d>
 
@@ -791,25 +832,31 @@ Can't be used with B<--rglob>.
 
 =item B<--eol> (disable with B<--noeol>)
 
-Separate output entries with a platform-specific end-of-line sequence
-rather than a NULL.  May be useful with B<-b> or B<--glob>.
+Terminate output entries with a platform-specific end-of-line sequence
+rather than a NULL.  May be useful with B<--glob>.
 
-=item B<< --from <argfile> >> (or B<< -@ <argfile> >>)
+By default, the terminator is NULL unless B<--eol> is given or escaping is
+active (by default or by B<-b> or B<--escape>).
 
-Read the pathspecs to be processed from B<argfile>; specify "-" to read from
-standard input.  Each pathspec in B<argfile>should
+If multiple escaping or terminator entries are given, B<--noeol> controls
+(if specified).
+
+=item B<< --from <atfile> >> (or B<< -@ <atfile> >>)
+
+Read the pathspecs to be processed from B<atfile>; specify "-" to read from
+standard input.  Each pathspec in B<atfile> should
 be separated by a NULL terminator ('\0').  This is ls_0_, after all.
 The input is read in binary mode, so filenames can contain any non-NULL
 character.
 
-See L</"Reading argfiles"> for details.
+See L</"Reading atfiles"> for details.
 
-=item B<< --fromeol <argfile> >>
+=item B<< --fromeol <atfile> >>
 
-As B<--from>, but each pathspec in B<argfile>
+As B<--from>, but each pathspec in B<atfile>
 should be separated by a platform-specific end-of-line.
 
-See L</"Reading argfiles"> for details.
+See L</"Reading atfiles"> for details.
 
 =item B<--glob>
 
@@ -822,11 +869,6 @@ globbing before ls0 sees them.
 
 Only list leaves, i.e., files plus directories for which no lower-level files
 are being listed.
-
-=item B<--noescape>
-
-Don't escape.  Used to override the effect of environment variable
-C<LS0_ESCAPE>.  Not yet implemented.
 
 =item B<-r>
 
@@ -874,20 +916,9 @@ can handle.
 
 =back
 
-=head2 Environment variables
+=head2 Reading atfiles
 
-=over
-
-=item C<LS0_ESCAPE>
-
-When set to a nonempty value, ls0 will escape (-b) by default.  Override with
-B<--noescape>, once that's implemented.
-
-=back
-
-=head2 Reading argfiles
-
-The B<--from> and B<--fromeol> options read argfiles and treat entries in those
+The B<--from> and B<--fromeol> options read atfiles and treat entries in those
 files as if those entries had been specified on the command line.  Things to
 bear in mind:
 
@@ -899,18 +930,18 @@ The filename C<-> refers to standard input.
 
 =item *
 
-You can't specify the same B<argfile> for more than one
+You can't specify the same B<atfile> for more than one
 B<--from> or B<--fromeol> option.
 
 =item *
 
 You B<shall not> make any assumptions about the relative order of items
-listed on the command line or in argfiles.  In any case, the output order is
+listed on the command line or in atfiles.  In any case, the output order is
 controlled only by any sorting options you provide.
 
 =item *
 B<--fromeol> does not unescape any
-characters.  If you use this, make sure the filenames in B<argfile> don't
+characters.  If you use this, make sure the filenames in B<atfile> don't
 contain end-of-line characters.
 
 =item *
@@ -927,18 +958,18 @@ characters at the end of them.
 
 =over
 
-=item B<< --from <argfile> >>, B<< --fromeol <argfile> >>
+=item B<< --from <atfile> >>, B<< --fromeol <atfile> >>
 
-Read input pathspecs from B<argfile>
+Read input pathspecs from B<atfile>.
 
 =item B<--glob>
 
-Glob in ls0 rather than (or in addition to) in the shell
+Glob in ls0 rather than (or in addition to) in the shell.
 
 =item B<--rglob>
 
 Glob in ls0 rather than (or in addition to) in the shell, and glob in each
-subdir
+subdir.
 
 =item B<--leaf>
 
@@ -952,13 +983,16 @@ The following GNU ls(1) options are not supported by ls0:
 
 =over
 
-=item B<-1> (print single line), B<-C> (list down columns), B<-m> (comma-separated output), B<-x> (list across rows), B<--format>
+=item B<-1> (print single line), B<-C> (list down columns),
+B<-m> (comma-separated output), B<-x> (list across rows), B<--format>
 
 We don't print these formats; we only support NULL and EOL as delimiters,
 and don't do multicolumn.
 Our B<-b> implies one line per file.
 
-=item B<-F>/B<--file-type> (print indicators), B<-N>/B<--literal> (print names literally), B<-q> (hide control chars), B<-Q>/B<--quote-name> (quote output), B<--quoting-style>
+=item B<-F>/B<--file-type> (print indicators),
+B<-N>/B<--literal> (print names literally), B<-q> (hide control chars),
+B<-Q>/B<--quote-name> (quote output), B<--quoting-style>
 
 We only print raw or with backslash escapes (B<-b>), so we don't support these.
 
