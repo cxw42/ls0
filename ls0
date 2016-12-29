@@ -12,7 +12,7 @@
 package Com::DevWrench::Ls0;
 
 # === Code ==============================================================
-exit main();   # Invoke
+# Code {{{1
 
 # --- Syntax ---
 use strict;
@@ -30,6 +30,7 @@ use Fcntl ':mode';
 #use File::Glob ':bsd_glob';
 use Data::Dumper;
 #use Class::Struct;
+use Hash::Util;
 
 # --- Constants ---
 use constant DEBUG => true;
@@ -48,36 +49,41 @@ use constant {          # record terminators
 # Regexes
 use constant RE_DOT_OR_DOTDOT => qr/^\.{1,2}$/;
 
-# --- Names of command-line arguments ---
-use constant {  # *_GOPTS are additional parameters for Getopt::Long
-    ALL_DOT => 'a',
-    MOST_DOT => 'A',
+# --- Command-line arguments ---
+my %CMDLINE_OPTS = (    
+    # hash from internal name to either:
+    #   - string of Getopt::Long options, beginning with the option name; or
+    #   - tuple [getopt-options, default-value]
+    # They are in alphabetical order by option name, lowercase before upper.
+    # No defaults for negatable options ('!') or string-value options ('=s').
+
+    ALL_DOT => ['a', false],
+    MOST_DOT => ['A', false],
     ESCAPE_OUTPUT_ONECHAR => 'b',
-    DIR_AS_DIR => 'd',
-    OUTPUT_TERM_IS_EOL => 'eol', OUTPUT_TERM_IS_EOL_GOPTS => '!',
+        # No default so we can tell what the user asked for
+    DIR_AS_DIR => ['d', false],
+    OUTPUT_TERM_IS_EOL => 'eol!',
         # terminator for each entry, including the last
-    ESCAPE_OUTPUT => 'escape', ESCAPE_OUTPUT_GOPTS => '!',
+    ESCAPE_OUTPUT => 'escape!',
 
     # "atfiles": Files listing other inputs.
-    AT_FILE => 'from',          # Atfile, NULL separated.
-    AT_FILE_GOPTS => '|@=s@',
-    AT_FILE_EOL => 'fromeol',   # Atfile, EOL separated (platform-specific)
-    AT_FILE_EOL_GOPTS => '=s@',
+    AT_FILE => 'from|@=s@',         # Atfile, NULL separated.
+    AT_FILE_EOL => 'fromeol=s@',    # Atfile, EOL separated (platform-specific)
 
-    DO_GLOB => 'glob',
-    LEAVES_ONLY => 'leaf',
-    SORT_OPT_REVERSE => 'r',
-    RECURSE => 'R',
-    RECURSIVE_GLOB => 'rglob',
+    DO_GLOB => ['glob', false],
+    # Note: --help reserved
+    LEAVES_ONLY => ['leaf', false],
+    SORT_OPT_REVERSE => ['r', false],
+    RECURSE => ['R', false],
+    RECURSIVE_GLOB => ['rglob', false],
 
-    SORT_NAME => 'sort', SORT_NAME_GOPTS => '=s',
-    SORT_OPT_SIZE => 'S',
-    SORT_OPT_TIME => 't',           # Sort on some time (mtime by default)
-    SORT_OPT_WHICHTIME => 'time',   # Which time to sort on
-    SORT_OPT_WHICHTIME_GOPTS => '=s',
-    SORT_OPT_NOSORT => 'U',
+    SORT_NAME => 'sort=s',
+    SORT_OPT_SIZE => ['S', false],
+    SORT_OPT_TIME => ['t', false],      # Sort on some time (mtime by default)
+    SORT_OPT_WHICHTIME => 'time=s',     # Which time to sort on
+    SORT_OPT_NOSORT => ['U', false],
 
-    LIKE_XARGS => "xargs",
+    LIKE_XARGS => ['xargs', false],
 
     # Other options not specified on the command line, but included in the hash
     SHOULD_ESCAPE => 'should_escape',       # Internal: whether or not to escape
@@ -90,7 +96,7 @@ use constant {  # *_GOPTS are additional parameters for Getopt::Long
     GLOBS => 'globs',           # list ref of the globs to check
 
     ADDL_PATHSPECS => 'fromatfiles',    # items listed in the atfiles
-};
+); # %CMDLINE_OPTS
 
 # Allowable sort types
 use constant {
@@ -187,6 +193,9 @@ sub make_printable;     # Returns a printable representation of the arg string
 
 # === Main ==============================================================
 
+main();         # Invoke.
+exit(EXIT_OK);  # if main() or something it called didn't already exit().
+
 sub main {
     my %opts;           # everything that controls the behaviour of ls0
     my $lrWorklist;     # what we are being asked to process
@@ -194,21 +203,21 @@ sub main {
     # since we are usually not printing newlines, don't line-buffer STDOUT
     $| = 1;
 
-    parse_command_line_into \%opts;     # Modifies @ARGV.
+    parse_command_line_into \%opts;     # Modifies @ARGV.  May exit().
 
     # Set up for recursive glob: If it has been requested, stash the
     # provided pathspecs to try at each directory we visit.
     # We don't need to stash for non-recursive glob since the
     # patterns are already in @ARGV.
-    $opts{&GLOBS} = @ARGV if $opts{&RECURSIVE_GLOB} && @ARGV;
+    $opts{GLOBS} = @ARGV if $opts{RECURSIVE_GLOB} && @ARGV;
 
     # Start with what was given on the command line (parse_c_l_into adds
     # '.' to @ARGV if no args were given, so @ARGV is always nonempty here).
     $lrWorklist = make_worklist \@ARGV, true;   # true => top-level args
 
     # Add the atfiles to the list
-    if(@{$opts{&ADDL_PATHSPECS}}) {
-        my $lrMoreWork = make_worklist $opts{&ADDL_PATHSPECS}, true;
+    if(@{$opts{ADDL_PATHSPECS}}) {
+        my $lrMoreWork = make_worklist $opts{ADDL_PATHSPECS}, true;
         push @$lrWorklist, @$lrMoreWork;
     }
 
@@ -223,8 +232,8 @@ sub main {
         my $lrSortedWorklist = sort_results(\%opts, $lrWorklist);
 
         # Dump the (possibly escaped) results
-        my $trm = $opts{&OUTPUT_TERM};
-        my $esc = $opts{&SHOULD_ESCAPE};
+        my $trm = $opts{OUTPUT_TERM};
+        my $esc = $opts{SHOULD_ESCAPE};
 
         for my Worklist_Item $wli (@$lrSortedWorklist) {
             # skip ones we cleared
@@ -249,7 +258,6 @@ sub main {
         exit EXIT_FILE_ERR;
     } #endif @failures
 
-    exit EXIT_OK;
 } # main()
 
 # === Worker routines ===================================================
@@ -298,7 +306,7 @@ sub process_worklist_item {
     # XXX implement globs
     #my $pathspec = $$srPathspec;
     #
-    #if($hrOpts->{&DO_GLOB} && !bDontGlob) {
+    #if($hrOpts->{DO_GLOB} && !bDontGlob) {
     #    my @results = bsd_glob($pathspec);
     #    if(!@results) {
     #        push @$lrFailures, "No files matched '" . make_printable $$srPathspec . "'.";
@@ -335,13 +343,13 @@ sub process_worklist_item {
 #        if DEBUG;
 
     # Shorthand for the context
-    my $all_dot = $hrOpts->{&ALL_DOT};
-    my $most_dot = $hrOpts->{&MOST_DOT};
-    my $recursive = $hrOpts->{&RECURSE};
-    my $dash_d = $hrOpts->{&DIR_AS_DIR};    # dash_d => not recursive
+    my $all_dot = $hrOpts->{ALL_DOT};
+    my $most_dot = $hrOpts->{MOST_DOT};
+    my $recursive = $hrOpts->{RECURSE};
+    my $dash_d = $hrOpts->{DIR_AS_DIR};    # dash_d => not recursive
     my $isTop = $wli->{top};
         # "top-level" means it was specified on the command line.
-    my $one_arg = $hrOpts->{&ONE_ARG};
+    my $one_arg = $hrOpts->{ONE_ARG};
 
     # Shorthand for special cases in the names
     my $isD = $basename eq '.';
@@ -417,11 +425,11 @@ sub process_worklist_item {
 sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
     my ($hrOpts, $lrWorklist) = @_;
     my @sorted;     # return array
-    my $sort_type = $hrOpts->{&SORT};
+    my $sort_type = $hrOpts->{SORT};
 
-    my $direction = $hrOpts->{&SORT_OPT_REVERSE} ? -1 : 1;
+    my $direction = $hrOpts->{SORT_OPT_REVERSE} ? -1 : 1;
         # Invert the sense of the comparisons if requested
-    $direction *= $hrOpts->{&SORTDIR};
+    $direction *= $hrOpts->{SORTDIR};
         # Take into account the default order for this sort type
 
     if($sort_type eq SORT_BY_NONE) {
@@ -435,7 +443,7 @@ sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
             @$lrWorklist;   # Note: sort on byte values, not characters.
 
     } elsif($sort_type eq SORT_BY_NUM) {
-        my $fld = $hrOpts->{&SORTFIELD};
+        my $fld = $hrOpts->{SORTFIELD};
         #print STDERR "Numeric sort on ", $fld, "\n" if DEBUG;
         @sorted = sort
             { $direction * ($a->{stat}->$fld() <=> $b->{stat}->$fld()) }
@@ -467,6 +475,13 @@ sub parse_command_line_into {
 
     my $hrOptsOut = shift;
 
+    # Return the short name of a command-line option
+    sub justname { return $_[0] =~ s/[^[a-zA-Z_].*$//r; }   
+
+    # Map internal name to option name
+    sub optname { return justname(ref($CMDLINE_OPTS{$_[0]}) ?  
+                            $CMDLINE_OPTS{$_[0]}[0] : $CMDLINE_OPTS{$_[0]}); }
+
     # Easier syntax for checking whether optional args were provided.
     # Syntax thanks to http://www.perlmonks.org/?node_id=696592
     local *have = sub { return exists($hrOptsOut->{$_[0]}); };
@@ -475,50 +490,21 @@ sub parse_command_line_into {
     Getopt::Long::Configure 'gnu_getopt';
 
     # Set defaults so we don't have to test them with exists().
-    %$hrOptsOut = (
-        &ALL_DOT => false,
-        &MOST_DOT => false,
-        #No default for ESCAPE_OUTPUT_ONECHAR so we can tell what the user
-        #asked for.
-        &DIR_AS_DIR => false,
-        #No default for OUTPUT_TERM_IS_EOL since it's negatable.
-        #Ditto ESCAPE_OUTPUT, AT_FILE, AT_FILE_EOL
-        &DO_GLOB => false,
-        &LEAVES_ONLY => false,
-        &SORT_OPT_REVERSE => false,
-        &RECURSE => false,
-        &RECURSIVE_GLOB => false,
-        #No default for SORT_NAME
-        &SORT_OPT_SIZE => false,
-        &SORT_OPT_TIME => false,
-        &SORT_OPT_WHICHTIME => SORTFIELD_MTIME,
-        &SORT_OPT_NOSORT => false,
-        &LIKE_XARGS => false,
-    );
+    {
+        my @keys_with_defaults = 
+            grep { ref($CMDLINE_OPTS{$_}) } keys %CMDLINE_OPTS;
+        my @kvs = 
+            map { optname($_) => $CMDLINE_OPTS{$_}[1] } 
+            @keys_with_defaults;    # map option name to default value
+
+        %$hrOptsOut = ( @kvs );
+    }
+    print STDERR "---------------Defaults\n",Dumper(%$hrOptsOut),"\n";
 
     # Get options
     GetOptions($hrOptsOut,  # destination hash
         'help|?', 'man',
-        ALL_DOT,
-        MOST_DOT,
-        ESCAPE_OUTPUT_ONECHAR,
-        DIR_AS_DIR,
-        OUTPUT_TERM_IS_EOL . OUTPUT_TERM_IS_EOL_GOPTS,
-        ESCAPE_OUTPUT . ESCAPE_OUTPUT_GOPTS,
-        AT_FILE . AT_FILE_GOPTS,
-        AT_FILE_EOL . AT_FILE_EOL_GOPTS,
-        DO_GLOB,
-        LEAVES_ONLY,
-        SORT_NAME . SORT_NAME_GOPTS,
-        SORT_OPT_REVERSE,
-        RECURSE,
-        RECURSIVE_GLOB,
-        SORT_NAME,
-        SORT_OPT_SIZE,
-        SORT_OPT_TIME,
-        SORT_OPT_WHICHTIME . SORT_OPT_WHICHTIME_GOPTS,
-        SORT_OPT_NOSORT,
-        LIKE_XARGS,
+        map { ref($_) ? $_->[0] : $_ } values %CMDLINE_OPTS,    # options strs
         )
     or pod2usage(2);
 
@@ -526,21 +512,42 @@ sub parse_command_line_into {
     pod2usage(1) if defined $hrOptsOut->{help};
     pod2usage(-verbose => 2) if defined $hrOptsOut->{man};
 
+    print STDERR "---------------After proc\n",Dumper(%$hrOptsOut),"\n";
+
+    # Map the short names from GetOptions back to the long names we use
+    {
+        # option name to internal name
+        my %revmap = map {  optname($_) => $_ } keys %CMDLINE_OPTS;
+
+        print STDERR "----------revmap\n",Dumper(%revmap), "\n";
+
+        my %newvals;
+        while(my ($k, $v) = each %$hrOptsOut) {
+            $newvals{$revmap{$k}} = $v;
+        }
+        print STDERR "----------newvals\n",Dumper(%newvals), "\n";
+        @$hrOptsOut{keys %newvals} = values %newvals;
+            # Thanks to http://www.perlmonks.org/?node_id=135163
+    }
+    print STDERR "---------------After filling\n",Dumper(%$hrOptsOut),"\n";
+
+    #exit(0);
+
     # --- Process implied options. ---
     # Note: have to use ampersand on &RECURSIVE_GLOB per
     # http://stackoverflow.com/a/96869/2877364 by
     # http://stackoverflow.com/users/3101/nohat
 
     # -d overrides -R
-    if($hrOptsOut->{&DIR_AS_DIR}) {
-        $hrOptsOut->{&RECURSE} = false;
+    if($hrOptsOut->{DIR_AS_DIR}) {
+        $hrOptsOut->{RECURSE} = false;
     }
 
     # --rglob implies -R and --glob
-    if($hrOptsOut->{&RECURSIVE_GLOB}) {
-        if(!$hrOptsOut->{&DIR_AS_DIR}) {
-            $hrOptsOut->{&RECURSE} = true;
-            $hrOptsOut->{&DO_GLOB} = true;
+    if($hrOptsOut->{RECURSIVE_GLOB}) {
+        if(!$hrOptsOut->{DIR_AS_DIR}) {
+            $hrOptsOut->{RECURSE} = true;
+            $hrOptsOut->{DO_GLOB} = true;
         } else {
             print STDERR "Can't use --rglob and -d together\n";
             exit EXIT_PARAM_ERR;
@@ -548,11 +555,11 @@ sub parse_command_line_into {
     } #endif --rglob
 
     # --xargs implies "--from -"
-    if($hrOptsOut->{&LIKE_XARGS}) {
-        if(have(AT_FILE)) {
-            push(@{$hrOptsOut->{&AT_FILE}}, "-")
+    if($hrOptsOut->{LIKE_XARGS}) {
+        if(have('AT_FILE')) {
+            push(@{$hrOptsOut->{AT_FILE}}, "-")
         } else {
-            $hrOptsOut->{&AT_FILE} = ["-"];
+            $hrOptsOut->{AT_FILE} = ["-"];
         }
     }
 
@@ -560,17 +567,17 @@ sub parse_command_line_into {
     # XXX expand to support other sorts
 
     # Collapse --sort to the equivalent - options
-    if(have(SORT_NAME)) {
-        if($hrOptsOut->{&SORT_NAME} eq "none") {
-            $hrOptsOut->{&SORT_OPT_NOSORT} = true;
-        } elsif ($hrOptsOut->{&SORT_NAME} eq "extension") {
+    if(have('SORT_NAME')) {
+        if($hrOptsOut->{SORT_NAME} eq "none") {
+            $hrOptsOut->{SORT_OPT_NOSORT} = true;
+        } elsif ($hrOptsOut->{SORT_NAME} eq "extension") {
             print STDERR "--sort=extension not yet supported.\n"; #XXX
             exit EXIT_PARAM_ERR;
-        } elsif ($hrOptsOut->{&SORT_NAME} eq "size") {
-            $hrOptsOut->{&SORT_OPT_SIZE} = true;
-        } elsif ($hrOptsOut->{&SORT_NAME} eq "time") {
-            $hrOptsOut->{&SORT_OPT_TIME} = true;
-        } elsif ($hrOptsOut->{&SORT_NAME} eq "version") {
+        } elsif ($hrOptsOut->{SORT_NAME} eq "size") {
+            $hrOptsOut->{SORT_OPT_SIZE} = true;
+        } elsif ($hrOptsOut->{SORT_NAME} eq "time") {
+            $hrOptsOut->{SORT_OPT_TIME} = true;
+        } elsif ($hrOptsOut->{SORT_NAME} eq "version") {
             print STDERR "--sort=version not yet supported.\n"; #XXX
             exit EXIT_PARAM_ERR;
         } else {
@@ -580,9 +587,9 @@ sub parse_command_line_into {
     } #endif --sort specified
 
     # Sanity checks.  First, -U prohibits all other sorting options.
-    if($hrOptsOut->{&SORT_OPT_NOSORT} && (
-            $hrOptsOut->{&SORT_OPT_REVERSE} ||
-            $hrOptsOut->{&SORT_OPT_TIME}
+    if($hrOptsOut->{SORT_OPT_NOSORT} && (
+            $hrOptsOut->{SORT_OPT_REVERSE} ||
+            $hrOptsOut->{SORT_OPT_TIME}
     )) {
         print STDERR "Can't use -U with any other sort option\n";
         exit EXIT_PARAM_ERR;
@@ -590,9 +597,9 @@ sub parse_command_line_into {
 
     {   # Second, did the user ask for more than one sort?
         my @sorts;
-        push(@sorts,SORT_OPT_SIZE) if $hrOptsOut->{&SORT_OPT_SIZE};
-        push(@sorts,SORT_OPT_TIME) if $hrOptsOut->{&SORT_OPT_TIME};
-        push(@sorts,SORT_OPT_NOSORT) if $hrOptsOut->{&SORT_OPT_NOSORT};
+        push(@sorts,'SORT_OPT_SIZE') if $hrOptsOut->{SORT_OPT_SIZE};
+        push(@sorts,'SORT_OPT_TIME') if $hrOptsOut->{SORT_OPT_TIME};
+        push(@sorts,'SORT_OPT_NOSORT') if $hrOptsOut->{SORT_OPT_NOSORT};
 
         if(@sorts > 1) {
             print "I can't sort by multiple keys (",
@@ -602,17 +609,17 @@ sub parse_command_line_into {
     } # end multi-sort check
 
     # Fill in the internal variables for each sort
-    if($hrOptsOut->{&SORT_OPT_NOSORT}) {
-        $hrOptsOut->{&SORT} = SORT_BY_NONE;
+    if($hrOptsOut->{SORT_OPT_NOSORT}) {
+        $hrOptsOut->{SORT} = SORT_BY_NONE;
 
-    } elsif($hrOptsOut->{&SORT_OPT_SIZE}) {
-        $hrOptsOut->{&SORT} = SORT_BY_NUM;
-        $hrOptsOut->{&SORTDIR} = -1;    # descending by default
-        $hrOptsOut->{&SORTFIELD} = "size";
+    } elsif($hrOptsOut->{SORT_OPT_SIZE}) {
+        $hrOptsOut->{SORT} = SORT_BY_NUM;
+        $hrOptsOut->{SORTDIR} = -1;    # descending by default
+        $hrOptsOut->{SORTFIELD} = "size";
 
-    } elsif($hrOptsOut->{&SORT_OPT_TIME}) {
-        $hrOptsOut->{&SORT} = SORT_BY_NUM;
-        $hrOptsOut->{&SORTDIR} = -1;    # descending by default
+    } elsif($hrOptsOut->{SORT_OPT_TIME}) {
+        $hrOptsOut->{SORT} = SORT_BY_NUM;
+        $hrOptsOut->{SORTDIR} = -1;    # descending by default
 
         my %time_types = (      # Possible ways to sort by time.
             atime => SORTFIELD_ATIME,   # ls(1) gives lots of synonyms.
@@ -624,60 +631,60 @@ sub parse_command_line_into {
             change => SORTFIELD_MTIME,
         );
 
-        my $which = $hrOptsOut->{&SORT_OPT_WHICHTIME};
+        my $which = $hrOptsOut->{SORT_OPT_WHICHTIME};
         if(!exists $time_types{$which}) {
             print STDERR "Unknown time type --time=$which\n",
                 "Valid values are: ",
                 join(", ", sort keys %time_types), ".\n";
             exit EXIT_PARAM_ERR;
         }
-        $hrOptsOut->{&SORTFIELD} =
-            $time_types{$hrOptsOut->{&SORT_OPT_WHICHTIME}}
+        $hrOptsOut->{SORTFIELD} =
+            $time_types{$hrOptsOut->{SORT_OPT_WHICHTIME}}
 
     } else {    # default sort
-        $hrOptsOut->{&SORT} = SORT_BY_NAME;
-        $hrOptsOut->{&SORTDIR} = 1;     # ascending by default
+        $hrOptsOut->{SORT} = SORT_BY_NAME;
+        $hrOptsOut->{SORTDIR} = 1;     # ascending by default
     }
 
     # --- Set other internal values based on the provided options ---
 
     # Handle -b, --escape, --noescape.  --noescape always wins if given.
 
-    if(     have(ESCAPE_OUTPUT) && !$hrOptsOut->{&ESCAPE_OUTPUT}) { #--noescape
-        $hrOptsOut->{&SHOULD_ESCAPE} = false;
+    if(     have('ESCAPE_OUTPUT') && !$hrOptsOut->{ESCAPE_OUTPUT}) { #--noescape
+        $hrOptsOut->{SHOULD_ESCAPE} = false;
 
-    } elsif(have(ESCAPE_OUTPUT) && $hrOptsOut->{&ESCAPE_OUTPUT}) {   #--escape
-        $hrOptsOut->{&SHOULD_ESCAPE} = true;
+    } elsif(have('ESCAPE_OUTPUT') && $hrOptsOut->{ESCAPE_OUTPUT}) {   #--escape
+        $hrOptsOut->{SHOULD_ESCAPE} = true;
 
-    } elsif(have(ESCAPE_OUTPUT_ONECHAR) &&                           # -b
-                $hrOptsOut->{&ESCAPE_OUTPUT_ONECHAR}) {
-        $hrOptsOut->{&SHOULD_ESCAPE} = true;
+    } elsif(have('ESCAPE_OUTPUT_ONECHAR') &&                           # -b
+                $hrOptsOut->{ESCAPE_OUTPUT_ONECHAR}) {
+        $hrOptsOut->{SHOULD_ESCAPE} = true;
 
     } else {                    # By default, escape if outputting to a tty.
-        $hrOptsOut->{&SHOULD_ESCAPE} = (-t STDOUT);
+        $hrOptsOut->{SHOULD_ESCAPE} = (-t STDOUT);
     }
 
     # Handle --eol, --noeol.  --noeol always wins if given.
 
-    if (    have(OUTPUT_TERM_IS_EOL) && !$hrOptsOut->{&OUTPUT_TERM_IS_EOL}) {
-        $hrOptsOut->{&OUTPUT_TERM} = TERM_NULL;                # --noeol
+    if (    have('OUTPUT_TERM_IS_EOL') && !$hrOptsOut->{OUTPUT_TERM_IS_EOL}) {
+        $hrOptsOut->{OUTPUT_TERM} = TERM_NULL;                # --noeol
 
-    } elsif(have(OUTPUT_TERM_IS_EOL) && $hrOptsOut->{&OUTPUT_TERM_IS_EOL}) {
-        $hrOptsOut->{&OUTPUT_TERM} = TERM_EOL;                 # --eol
+    } elsif(have('OUTPUT_TERM_IS_EOL') && $hrOptsOut->{OUTPUT_TERM_IS_EOL}) {
+        $hrOptsOut->{OUTPUT_TERM} = TERM_EOL;                 # --eol
 
     } else {                                        # default: EOL if escaping
-        $hrOptsOut->{&OUTPUT_TERM} =
-            $hrOptsOut->{&SHOULD_ESCAPE} ? TERM_EOL : TERM_NULL;
+        $hrOptsOut->{OUTPUT_TERM} =
+            $hrOptsOut->{SHOULD_ESCAPE} ? TERM_EOL : TERM_NULL;
     }
 
     # Globbing
-    if($hrOptsOut->{&RECURSIVE_GLOB} || $hrOptsOut->{&DO_GLOB}) {
+    if($hrOptsOut->{RECURSIVE_GLOB} || $hrOptsOut->{DO_GLOB}) {
         print STDERR "Globbing not yet implemented.\n";     # XXX
         exit EXIT_PARAM_ERR;
     }
 
     # Leaves-only mode
-    if($hrOptsOut->{&LEAVES_ONLY}) {
+    if($hrOptsOut->{LEAVES_ONLY}) {
         print STDERR "--leaf not yet implemented.\n";       # XXX
         exit EXIT_PARAM_ERR;
     }
@@ -686,8 +693,8 @@ sub parse_command_line_into {
 
     { # Check for duplicates
         my @filenames = (   # all the filenames together
-            have(AT_FILE) ?         @{$hrOptsOut->{&AT_FILE}} :     (),
-            have(AT_FILE_EOL) ?    @{$hrOptsOut->{&AT_FILE_EOL}} : ()
+            have('AT_FILE') ?         @{$hrOptsOut->{AT_FILE}} :     (),
+            have('AT_FILE_EOL') ?    @{$hrOptsOut->{AT_FILE_EOL}} : ()
         );
         my %seen;   # which filenames we've seen
         my $ok = true;
@@ -709,29 +716,29 @@ sub parse_command_line_into {
     { # read atfiles
         my @entries;    # list of all the pathspecs in the atfiles
 
-        if(have(AT_FILE)) {
-            my $lrEntries = read_entries(TERM_NULL, $hrOptsOut->{&AT_FILE});
+        if(have('AT_FILE')) {
+            my $lrEntries = read_entries(TERM_NULL, $hrOptsOut->{AT_FILE});
             push @entries, @$lrEntries;
         } # endif --from
 
-        if(have(AT_FILE_EOL)) {
-            my $lrEntries = read_entries(TERM_EOL, $hrOptsOut->{&AT_FILE_EOL});
+        if(have('AT_FILE_EOL')) {
+            my $lrEntries = read_entries(TERM_EOL, $hrOptsOut->{AT_FILE_EOL});
             push @entries, @$lrEntries;
         } # endif --fromeol
 
-        $hrOptsOut->{&ADDL_PATHSPECS} = \@entries;
+        $hrOptsOut->{ADDL_PATHSPECS} = \@entries;
     } #end read atfiles
 
     # --- If we have no args or atfiles, process the current dir. ---
     # If atfiles were specified, don't add cwd even if the atfiles
     # didn't include any pathspecs.
-    unless(@ARGV || have(AT_FILE) || have(AT_FILE_EOL)) {
+    unless(@ARGV || have('AT_FILE') || have('AT_FILE_EOL')) {
         push @ARGV, curdir();
     }
 
     # How many args?  This is a special case: don't print the arg name
     # if it was the only arg and was a directory.
-    $hrOptsOut->{&ONE_ARG} = (scalar @ARGV == 1);
+    $hrOptsOut->{ONE_ARG} = (scalar @ARGV == 1);
 
 } # parse_command_line_into()
 
@@ -786,8 +793,10 @@ sub make_worklist {
 ############################################################################
 # Usage manual is below
 
+# }}}1
 __END__
 
+# Documentation {{{2
 =pod
 
 =encoding UTF-8
@@ -1055,5 +1064,7 @@ L<ruel|http://stackoverflow.com/users/459338/ruel>.
 
 =cut
 
-# vi: set ts=4 sts=4 sw=4 et ai ff=unix fenc=utf8: #
+# }}}2
+
+# vi: set ts=4 sts=4 sw=4 et ai ff=unix fenc=utf8 foldmethod=marker foldenable foldlevel=1: #
 
