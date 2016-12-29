@@ -499,7 +499,7 @@ sub parse_command_line_into {
             @keys_with_defaults;    # map option name to default value
 
         %$hrOptsOut = ( @kvs );
-    }
+    } #end default-setting
 
     # Get options
     GetOptions($hrOptsOut,  # destination hash
@@ -519,7 +519,7 @@ sub parse_command_line_into {
         while(my ($k, $v) = each %$hrOptsOut) { $newvals{$revmap{$k}} = $v; }
 
         @$hrOptsOut{keys %newvals} = values %newvals;
-    }       # ^ Thanks to http://www.perlmonks.org/?node_id=135163
+    } #end option mapping.  ^ Thanks to http://www.perlmonks.org/?node_id=135163
 
     # --- Process implied options. ---
     # Note: have to use ampersand on &RECURSIVE_GLOB per
@@ -549,7 +549,7 @@ sub parse_command_line_into {
         } else {
             $hrOptsOut->{AT_FILE} = ["-"];
         }
-    }
+    } #endif --xargs
 
     # --- Sorting options ---
     # XXX expand to support other sorts
@@ -575,16 +575,7 @@ sub parse_command_line_into {
         }
     } #endif --sort specified
 
-    # Sanity checks.  First, -U prohibits all other sorting options.
-    if($hrOptsOut->{SORT_OPT_NOSORT} && (
-            $hrOptsOut->{SORT_OPT_REVERSE} ||
-            $hrOptsOut->{SORT_OPT_TIME}
-    )) {
-        print STDERR "Can't use -U with any other sort option\n";
-        exit EXIT_PARAM_ERR;
-    }
-
-    {   # Second, did the user ask for more than one sort?
+    { # Sanity checks: did the user ask for more than one sort?
         my @sorts;
         push(@sorts,'SORT_OPT_SIZE') if $hrOptsOut->{SORT_OPT_SIZE};
         push(@sorts,'SORT_OPT_TIME') if $hrOptsOut->{SORT_OPT_TIME};
@@ -599,6 +590,10 @@ sub parse_command_line_into {
 
     # Fill in the internal variables for each sort
     if($hrOptsOut->{SORT_OPT_NOSORT}) {
+        if($hrOptsOut->{SORT_OPT_REVERSE}) {
+            print STDERR "Can't reverse a non-sorted list (-U -r).\n";
+            exit EXIT_PARAM_ERR;
+        }
         $hrOptsOut->{SORT} = SORT_BY_NONE;
 
     } elsif($hrOptsOut->{SORT_OPT_SIZE}) {
@@ -611,6 +606,7 @@ sub parse_command_line_into {
         $hrOptsOut->{SORTDIR} = -1;    # descending by default
 
         my %time_types = (      # Possible ways to sort by time.
+            # '?' is reserved
             atime => SORTFIELD_ATIME,   # ls(1) gives lots of synonyms.
             access => SORTFIELD_ATIME,
             use => SORTFIELD_ATIME,
@@ -641,12 +637,12 @@ sub parse_command_line_into {
     # Handle -b, --escape, --noescape.  --noescape always wins if given.
 
     if(     have('ESCAPE_OUTPUT') && !$hrOptsOut->{ESCAPE_OUTPUT}) { #--noescape
-        $hrOptsOut->{SHOULD_ESCAPE} = false;
+        $hrOptsOut->{SHOULD_ESCAPE} = false;                        #always wins
 
-    } elsif(have('ESCAPE_OUTPUT') && $hrOptsOut->{ESCAPE_OUTPUT}) {   #--escape
+    } elsif(have('ESCAPE_OUTPUT') && $hrOptsOut->{ESCAPE_OUTPUT}) { #--escape
         $hrOptsOut->{SHOULD_ESCAPE} = true;
 
-    } elsif(have('ESCAPE_OUTPUT_ONECHAR') &&                           # -b
+    } elsif(have('ESCAPE_OUTPUT_ONECHAR') &&                        # -b
                 $hrOptsOut->{ESCAPE_OUTPUT_ONECHAR}) {
         $hrOptsOut->{SHOULD_ESCAPE} = true;
 
@@ -657,10 +653,10 @@ sub parse_command_line_into {
     # Handle --eol, --noeol.  --noeol always wins if given.
 
     if (    have('OUTPUT_TERM_IS_EOL') && !$hrOptsOut->{OUTPUT_TERM_IS_EOL}) {
-        $hrOptsOut->{OUTPUT_TERM} = TERM_NULL;                # --noeol
+        $hrOptsOut->{OUTPUT_TERM} = TERM_NULL;          # --noeol always wins
 
     } elsif(have('OUTPUT_TERM_IS_EOL') && $hrOptsOut->{OUTPUT_TERM_IS_EOL}) {
-        $hrOptsOut->{OUTPUT_TERM} = TERM_EOL;                 # --eol
+        $hrOptsOut->{OUTPUT_TERM} = TERM_EOL;                       # --eol
 
     } else {                                        # default: EOL if escaping
         $hrOptsOut->{OUTPUT_TERM} =
@@ -867,7 +863,7 @@ are being listed.
 
 =item B<-r>
 
-Reverse the order of the sort.
+Reverse the order of the sort.  Cannot be used with B<-U> (unsorted listing).
 
 =item B<-R>
 
@@ -890,7 +886,7 @@ unless B<--time> is given.
 
 =item B<< --time <timeval> >>
 
-Use B<< <timeval> >> as the time when sorting.  Run C<ls0 --time=> to see
+Use B<< <timeval> >> as the time when sorting.  Run C<ls0 -t --time=?> to see
 the list of available times.  At least B<atime>, B<ctime>, and B<mtime>
 are available.
 
@@ -899,7 +895,7 @@ are available.
 Don't sort the results - you get them in whatever order you get them.
 This will likely be the breadth-first search order ls0 currently uses,
 but you B<shall not> make any assumptions about name order when using
-this option.
+this option.  Cannot be used with B<-r>.
 
 =item B<--xargs>
 
