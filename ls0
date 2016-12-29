@@ -3,6 +3,8 @@
 # To see the output on the console, pipe it to cat -A.  Nulls show as ^@.
 # XXX marks features to be implemented; TODO marks other items to do.
 
+# TODO next: assume --xargs unless pathspecs or atfiles given.
+
 # Style note: Hungarian prefixes are used on scalars:
 #   "hr" (hash ref), "lr" (list ref), "sr" (string ref), "nr" (numeric ref),
 #   "b" or "is" (boolean), "s" (string), "wli" (Worklist_Item instance)
@@ -30,7 +32,6 @@ use Fcntl ':mode';
 #use File::Glob ':bsd_glob';
 use Data::Dumper;
 #use Class::Struct;
-use Hash::Util;
 
 # --- Constants ---
 use constant DEBUG => true;
@@ -50,7 +51,7 @@ use constant {          # record terminators
 use constant RE_DOT_OR_DOTDOT => qr/^\.{1,2}$/;
 
 # --- Command-line arguments ---
-my %CMDLINE_OPTS = (    
+my %CMDLINE_OPTS = (
     # hash from internal name to either:
     #   - string of Getopt::Long options, beginning with the option name; or
     #   - tuple [getopt-options, default-value]
@@ -73,6 +74,7 @@ my %CMDLINE_OPTS = (
     DO_GLOB => ['glob', false],
     # Note: --help reserved
     LEAVES_ONLY => ['leaf', false],
+    # Note: --man reserved
     SORT_OPT_REVERSE => ['r', false],
     RECURSE => ['R', false],
     RECURSIVE_GLOB => ['rglob', false],
@@ -86,14 +88,14 @@ my %CMDLINE_OPTS = (
     LIKE_XARGS => ['xargs', false],
 
     # Other options not specified on the command line, but included in the hash
-    SHOULD_ESCAPE => 'should_escape',       # Internal: whether or not to escape
-    OUTPUT_TERM => 'output_terminator',     # \n or \0
-    DEPTH => 'depth',
-    ONE_ARG => 'one_arg',       # if only one arg provided
-    SORT => 'whichsort',        # how to sort
-    SORTFIELD => 'sortfield',   # which field of the stat structure to sort on
-    SORTDIR => 'sortdir',       # default order: 1 for asc; -1 for desc
-    GLOBS => 'globs',           # list ref of the globs to check
+    #SHOULD_ESCAPE => 'should_escape',       # Internal: whether or not to escape
+    #OUTPUT_TERM => 'output_terminator',     # \n or \0
+    #DEPTH => 'depth',
+    #ONE_ARG => 'one_arg',       # if only one arg provided
+    #SORT => 'whichsort',        # how to sort
+    #SORTFIELD => 'sortfield',   # which field of the stat structure to sort on
+    #SORTDIR => 'sortdir',       # default order: 1 for asc; -1 for desc
+    #GLOBS => 'globs',           # list ref of the globs to check
 
     ADDL_PATHSPECS => 'fromatfiles',    # items listed in the atfiles
 ); # %CMDLINE_OPTS
@@ -114,7 +116,7 @@ use constant {
 use constant {
     SORTFIELD_ATIME => 'atime',
     SORTFIELD_CTIME => 'ctime',
-    SORTFIELD_MTIME => 'mtime',
+    SORTFIELD_MTIME => 'mtime',     # default
     # TODO add more
 };
 
@@ -476,10 +478,10 @@ sub parse_command_line_into {
     my $hrOptsOut = shift;
 
     # Return the short name of a command-line option
-    sub justname { return $_[0] =~ s/[^[a-zA-Z_].*$//r; }   
+    sub justname { return $_[0] =~ s/[^[a-zA-Z_].*$//r; }
 
     # Map internal name to option name
-    sub optname { return justname(ref($CMDLINE_OPTS{$_[0]}) ?  
+    sub optname { return justname(ref($CMDLINE_OPTS{$_[0]}) ?
                             $CMDLINE_OPTS{$_[0]}[0] : $CMDLINE_OPTS{$_[0]}); }
 
     # Easier syntax for checking whether optional args were provided.
@@ -489,17 +491,15 @@ sub parse_command_line_into {
     # --- Parse the options ---
     Getopt::Long::Configure 'gnu_getopt';
 
-    # Set defaults so we don't have to test them with exists().
-    {
-        my @keys_with_defaults = 
+    { # Set defaults so we don't have to test them with exists().
+        my @keys_with_defaults =
             grep { ref($CMDLINE_OPTS{$_}) } keys %CMDLINE_OPTS;
-        my @kvs = 
-            map { optname($_) => $CMDLINE_OPTS{$_}[1] } 
+        my @kvs =
+            map { optname($_) => $CMDLINE_OPTS{$_}[1] }
             @keys_with_defaults;    # map option name to default value
 
         %$hrOptsOut = ( @kvs );
     }
-    print STDERR "---------------Defaults\n",Dumper(%$hrOptsOut),"\n";
 
     # Get options
     GetOptions($hrOptsOut,  # destination hash
@@ -512,26 +512,14 @@ sub parse_command_line_into {
     pod2usage(1) if defined $hrOptsOut->{help};
     pod2usage(-verbose => 2) if defined $hrOptsOut->{man};
 
-    print STDERR "---------------After proc\n",Dumper(%$hrOptsOut),"\n";
-
-    # Map the short names from GetOptions back to the long names we use
-    {
-        # option name to internal name
+    { # Map the option names from GetOptions back to the internal names we use
         my %revmap = map {  optname($_) => $_ } keys %CMDLINE_OPTS;
 
-        print STDERR "----------revmap\n",Dumper(%revmap), "\n";
-
         my %newvals;
-        while(my ($k, $v) = each %$hrOptsOut) {
-            $newvals{$revmap{$k}} = $v;
-        }
-        print STDERR "----------newvals\n",Dumper(%newvals), "\n";
-        @$hrOptsOut{keys %newvals} = values %newvals;
-            # Thanks to http://www.perlmonks.org/?node_id=135163
-    }
-    print STDERR "---------------After filling\n",Dumper(%$hrOptsOut),"\n";
+        while(my ($k, $v) = each %$hrOptsOut) { $newvals{$revmap{$k}} = $v; }
 
-    #exit(0);
+        @$hrOptsOut{keys %newvals} = values %newvals;
+    }       # ^ Thanks to http://www.perlmonks.org/?node_id=135163
 
     # --- Process implied options. ---
     # Note: have to use ampersand on &RECURSIVE_GLOB per
@@ -581,7 +569,8 @@ sub parse_command_line_into {
             print STDERR "--sort=version not yet supported.\n"; #XXX
             exit EXIT_PARAM_ERR;
         } else {
-            print STDERR "Unknown --sort name\n";
+            print STDERR "Unknown sort type --sort=",
+                make_printable($hrOptsOut->{SORT_NAME}), "\n";
             exit EXIT_PARAM_ERR;
         }
     } #endif --sort specified
@@ -631,15 +620,16 @@ sub parse_command_line_into {
             change => SORTFIELD_MTIME,
         );
 
-        my $which = $hrOptsOut->{SORT_OPT_WHICHTIME};
-        if(!exists $time_types{$which}) {
-            print STDERR "Unknown time type --time=$which\n",
-                "Valid values are: ",
+        my $which = have('SORT_OPT_WHICHTIME') ?
+            $hrOptsOut->{SORT_OPT_WHICHTIME} : SORTFIELD_MTIME;
+
+        if(!exists($time_types{$which})) {
+            print STDERR "Unknown time type --time=",
+                make_printable($which), "\nValid values are: ",
                 join(", ", sort keys %time_types), ".\n";
             exit EXIT_PARAM_ERR;
         }
-        $hrOptsOut->{SORTFIELD} =
-            $time_types{$hrOptsOut->{SORT_OPT_WHICHTIME}}
+        $hrOptsOut->{SORTFIELD} = $time_types{$which};
 
     } else {    # default sort
         $hrOptsOut->{SORT} = SORT_BY_NAME;
@@ -744,17 +734,13 @@ sub parse_command_line_into {
 
 sub read_entries {
 # takes $sTerm and $lrFilenames; returns $lrEntries.
-    #print STDERR Dumper(@_), "\n";
     my ($sTerm, $lrFilenames) = @_;
-    #print STDERR Dumper(@$lrFilenames), "\n";
     my @retval;
 
     for my $fn (@$lrFilenames) {
-        #print STDERR "$fn\n";
         my $fh;
-        if($fn eq "-") {    # we already checked that this only
-            #print STDERR "Using stdin\n";
-            $fh = *STDIN;    # occurs once.
+        if($fn eq "-") {    # we already checked that this only occurs once
+            $fh = *STDIN;
         }
         elsif(! (-f $fn && -r _ && -s _)) {
             print STDERR (  # E.g., if someone says -@ <dirname>
@@ -765,7 +751,7 @@ sub read_entries {
         }
         elsif(!open($fh, "<:raw", $fn)) {
             print STDERR    # raw because NULL term
-                "Couldn't open filename ", make_printable $fn, "\n";
+                "Couldn't open filename ", make_printable($fn), "\n";
             exit EXIT_PARAM_ERR;
         }
 
