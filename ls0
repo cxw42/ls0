@@ -29,11 +29,11 @@ use File::Basename 'fileparse';
 use File::stat;
 use Fcntl ':mode';
 #use File::Glob ':bsd_glob';
-use Data::Dumper;
+#use Data::Dumper;
 #use Class::Struct;
 
 # --- Constants ---
-use constant DEBUG => true;
+#use constant DEBUG => false;
 
 use constant {          # shell exit codes
     EXIT_OK => 0,          # success
@@ -41,13 +41,13 @@ use constant {          # shell exit codes
     EXIT_PARAM_ERR => 2,   # couldn't understand the command line
 };
 
-use constant {          # record terminators
+use constant {          # output-record terminators
     TERM_NULL => "\0",
     TERM_EOL => "\n",   # which will be translated to CRLF if necessary.
 };                      # per http://www.perlmonks.org/?node_id=890769
 
 # Regexes
-use constant RE_DOT_OR_DOTDOT => qr/^\.{1,2}$/;
+use constant RE_DOT_OR_DOTDOT => qr/^\.{1,2}$/;     # cwd or parent
 
 # --- Command-line arguments ---
 my %CMDLINE_OPTS = (
@@ -86,20 +86,20 @@ my %CMDLINE_OPTS = (
 
     LIKE_XARGS => ['xargs', false],
 
-    # Other options not specified on the command line, but included in the hash
-    #SHOULD_ESCAPE => 'should_escape',       # Internal: whether or not to escape
-    #OUTPUT_TERM => 'output_terminator',     # \n or \0
-    #DEPTH => 'depth',
-    #ONE_ARG => 'one_arg',       # if only one arg provided
-    #SORT => 'whichsort',        # how to sort
-    #SORTFIELD => 'sortfield',   # which field of the stat structure to sort on
-    #SORTDIR => 'sortdir',       # default order: 1 for asc; -1 for desc
-    #GLOBS => 'globs',           # list ref of the globs to check
-
-    ADDL_PATHSPECS => 'fromatfiles',    # items listed in the atfiles
+    # Other options not specified on the command line, but included in the
+    # hash provided by process_command_line_into() (don't use these as
+    # internal names of command-line options):
+    # SHOULD_ESCAPE     whether or not to escape
+    # OUTPUT_TERM       \n or \0.  After each output entry, including the last.
+    # ONE_ARG           if only one arg provided
+    # SORT_TYPE         how to sort (a SORT_BY_* constant)
+    # SORTFIELD         which field of the stat structure to sort on
+    # SORTDIR           default order: 1 for asc; -1 for desc
+    # GLOBS             list ref of the globs to check XXX
+    # ADDL_PATHSPECS    items listed in the atfiles
 ); # %CMDLINE_OPTS
 
-# Allowable sort types
+# Allowable sort types (SORT_TYPE values)
 use constant {
     SORT_BY_NONE => 'none',
     SORT_BY_NAME => 'name',     # a-z unless reverse.  Default.
@@ -111,12 +111,12 @@ use constant {
         # TODO support this?  Require the user specify the filename encoding?
 };
 
-# Names of File::Stat fields we can sort on
+# Names of File::Stat fields we can sort on (SORTFIELD values)
 use constant {
     SORTFIELD_ATIME => 'atime',
     SORTFIELD_CTIME => 'ctime',
     SORTFIELD_MTIME => 'mtime',     # default
-    # TODO add more
+    # TODO add more?
 };
 
 # --- Worklist Items ---
@@ -167,30 +167,31 @@ package Worklist_Item {
 
 # Do the work
 sub process_worklist;
-    # takes hrOpts, lrWorklist, lrOutputWorklist, and lrFailures.
-    # Adds to lrOutputWorklist any outputs.  Adds to lrFailures any
+    # takes $hrOpts, $lrWorklist, $lrOutputWorklist, and $lrFailures.
+    # Adds to @$lrOutputWorklist any outputs.  Adds to @$lrFailures any
     # string error messages.  May modify @$lrWorklist.
     # Returns a bool indicating whether at least one worklist item
     # is to be printed as a result.
 
 sub process_worklist_item;
-    # takes (hrOpts, wli, lrFailures, lrAddl [, bDontGlob].
-    # Adds to lrAddl any pathspecs needing processing.  This yields a breadth-
-    # first search of the space.  May modify $wli.
+    # takes ($hrOpts, $wli, $lrFailures, $lrAddl).
+    # Adds to @$lrAddl any pathspecs needing processing.  This yields a
+    # breadth-first search of the space.  May modify $wli.
+    # Adds to @$lrFailures any error messages.
     # Returns a bool indicating whether the worklist item is visible.
 
 sub sort_results;
-    # takes hrOpts, lrWorklist; returns a reference to the sorted list.
+    # takes $hrOpts, $lrWorklist; returns a reference to the sorted list.
     # Per the docs for sort, the result list includes aliases to the
     # elements of $lrWorklist, rather than copies.
 
 # Utility routines
 sub make_printable;     # Returns a printable representation of the arg string
-sub make_worklist;      # takes lrStrings, bIsTop; returns lrWorklist.
+sub make_worklist;      # takes $lrStrings, $bIsTop; returns $lrWorklist.
 
 # Command-line handling
-sub parse_command_line_into;    # takes and modifies hrOpts; modifies @ARGV
-sub read_entries;               # read entries from an atfile
+sub parse_command_line_into;    # takes and modifies $hrOpts; modifies @ARGV
+sub read_entries;               # read entries from an atfile; returns \@items
 # }}}2
 
 # === Main ========================================================= {{{2
@@ -427,7 +428,7 @@ sub process_worklist_item {
 sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
     my ($hrOpts, $lrWorklist) = @_;
     my @sorted;     # return array
-    my $sort_type = $hrOpts->{SORT};
+    my $sort_type = $hrOpts->{SORT_TYPE};
 
     my $direction = $hrOpts->{SORT_OPT_REVERSE} ? -1 : 1;
         # Invert the sense of the comparisons if requested
@@ -607,15 +608,15 @@ sub parse_command_line_into {
             print STDERR "Can't reverse a non-sorted list (-U -r).\n";
             exit EXIT_PARAM_ERR;
         }
-        $hrOptsOut->{SORT} = SORT_BY_NONE;
+        $hrOptsOut->{SORT_TYPE} = SORT_BY_NONE;
 
     } elsif($hrOptsOut->{SORT_OPT_SIZE}) {
-        $hrOptsOut->{SORT} = SORT_BY_NUM;
+        $hrOptsOut->{SORT_TYPE} = SORT_BY_NUM;
         $hrOptsOut->{SORTDIR} = -1;    # descending by default
         $hrOptsOut->{SORTFIELD} = "size";
 
     } elsif($hrOptsOut->{SORT_OPT_TIME}) {
-        $hrOptsOut->{SORT} = SORT_BY_NUM;
+        $hrOptsOut->{SORT_TYPE} = SORT_BY_NUM;
         $hrOptsOut->{SORTDIR} = -1;    # descending by default
 
         my %time_types = (      # Possible ways to sort by time.
@@ -641,7 +642,7 @@ sub parse_command_line_into {
         $hrOptsOut->{SORTFIELD} = $time_types{$which};
 
     } else {    # default sort
-        $hrOptsOut->{SORT} = SORT_BY_NAME;
+        $hrOptsOut->{SORT_TYPE} = SORT_BY_NAME;
         $hrOptsOut->{SORTDIR} = 1;     # ascending by default
     }
 
