@@ -1,20 +1,21 @@
 #!/usr/bin/env perl
 # ls0: A "ls" replacement that null-terminates its output filenames.
-# To see the output on the console, pipe it to cat -A.  Nulls show as ^@.
+# To see the output on the console, pipe it to cat -A (nulls show as ^@)
+# or to od -c.
 # XXX marks features to be implemented; TODO marks other items to do.
 
-# TODO next: assume --xargs unless pathspecs or atfiles given.
+# TODO next: assume --xargs unless pathspecs or atfiles are given or
+# stdin is a tty.
+# TODO? add an option to prune specific directories, files, globs, ...?
 
 # Style note: Hungarian prefixes are used on scalars:
 #   "hr" (hash ref), "lr" (list ref), "sr" (string ref), "nr" (numeric ref),
 #   "b" or "is" (boolean), "s" (string), "wli" (Worklist_Item instance)
 
-# TODO? add an option to prune specific directories?
-
 package Com::DevWrench::Ls0;
 
-# === Code ==============================================================
-# Code {{{1
+# === Code ========================================================= {{{1
+# Declarations {{{2
 
 # --- Syntax ---
 use strict;
@@ -185,15 +186,16 @@ sub sort_results;
     # Per the docs for sort, the result list includes aliases to the
     # elements of $lrWorklist, rather than copies.
 
+# Utility routines
+sub make_printable;     # Returns a printable representation of the arg string
+sub make_worklist;      # takes lrStrings, bIsTop; returns lrWorklist.
+
 # Command-line handling
 sub parse_command_line_into;    # takes and modifies hrOpts; modifies @ARGV
 sub read_entries;               # read entries from an atfile
-sub make_worklist;              # takes lrStrings, bIsTop; returns lrWorklist.
+# }}}2
 
-# Utility routines
-sub make_printable;     # Returns a printable representation of the arg string
-
-# === Main ==============================================================
+# === Main ========================================================= {{{2
 
 main();         # Invoke.
 exit(EXIT_OK);  # if main() or something it called didn't already exit().
@@ -332,7 +334,7 @@ sub process_worklist_item {
 
     if(!$fileinfo) {
         push @$lrFailures, "Could not stat $item_text";
-        $wli->suppress;     # dont' display it, since it's not actually there!
+        $wli->suppress;     # don't display it, since it's not actually there!
         return;
     }
 
@@ -456,8 +458,20 @@ sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
     }
     return \@sorted;
 } # sort_results()
+# }}}2
 
-# === Utility routines ==================================================
+# === Utility routines ============================================= {{{2
+
+sub make_worklist {
+    my $lrStrings = shift;  # May be a reference to an empty list
+    my $isTop = @_ ? shift : false;
+    my @srStringRefs = \(@$lrStrings);
+        # list of string refs to each element of the provided list
+
+    my @worklist = map { Worklist_Item::->new($_, $isTop) } @srStringRefs;
+
+    return \@worklist;
+} # make_worklist()
 
 sub make_printable {
 # Return a printable version (octal escapes) of the original string.
@@ -466,8 +480,9 @@ sub make_printable {
         # For hex, use s/.../'\x'.unpack('H*', $1)/ger per
         # http://perldoc.perl.org/perlpacktut.html#The-Basic-Principle
 } # make_printable()
+# }}}2
 
-# === Command line ======================================================
+# === Command line ================================================= {{{2
 
 sub parse_command_line_into {
 # Takes a reference to a hash into which the options will go.
@@ -760,23 +775,10 @@ sub read_entries {
 
     return \@retval;
 } # read_entries()
+# }}}2
 
-sub make_worklist {
-    my $lrStrings = shift;  # May be a reference to an empty list
-    my $isTop = @_ ? shift : false;
-    my @srStringRefs = \(@$lrStrings);
-        # list of string refs to each element of the provided list
-
-    my @worklist = map { Worklist_Item::->new($_, $isTop) } @srStringRefs;
-
-    return \@worklist;
-} # make_worklist()
-
-############################################################################
-# Usage manual is below
-
-# }}}1
 __END__
+# }}}1
 
 # Documentation {{{2
 =pod
@@ -808,7 +810,9 @@ Also list files beginning with a '.', except for '.' and '..'
 
 =item B<-b>, B<--escape> (disable with B<--noescape>)
 
-Print octal escapes for special characters and backslashes.  Implies B<--eol>
+Print octal escapes for special characters and backslashes
+(which are \134).
+Implies B<--eol>
 (newline terminators); also specify B<--noeol> if you still want null
 terminators.
 
