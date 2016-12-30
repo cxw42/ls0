@@ -4,8 +4,6 @@
 # or to od -c.
 # XXX marks features to be implemented; TODO marks other items to do.
 
-# TODO next: assume --xargs unless pathspecs or atfiles are given or
-# stdin is a tty.
 # TODO? add an option to prune specific directories, files, globs, ...?
 
 # Style note: Hungarian prefixes are used on scalars:
@@ -518,28 +516,37 @@ sub parse_command_line_into {
 
     # Get options
     GetOptions($hrOptsOut,  # destination hash
-        'help|?', 'man',
+        'usage|?', 'help', 'man',
         map { ref($_) ? $_->[0] : $_ } values %CMDLINE_OPTS,    # options strs
         )
-    or pod2usage(2);
+    or pod2usage(-verbose => 0, -exitval => EXIT_PARAM_ERR);    # unknown opt
 
     # Help, if requested
-    pod2usage(1) if defined $hrOptsOut->{help};
-    pod2usage(-verbose => 2) if defined $hrOptsOut->{man};
+    pod2usage(-verbose => 0, -exitval => 1) if have('usage');
+    pod2usage(-verbose => 1, -exitval => 1) if have('help');
+    pod2usage(-verbose => 2, -exitval => 1) if have('man');
 
     { # Map the option names from GetOptions back to the internal names we use
         my %revmap = map {  optname($_) => $_ } keys %CMDLINE_OPTS;
+        for my $optname (keys %$hrOptsOut) {
+            $hrOptsOut->{$revmap{$optname}} = $hrOptsOut->{$optname};
+        }
+    } #end option mapping.
 
-        my %newvals;
-        while(my ($k, $v) = each %$hrOptsOut) { $newvals{$revmap{$k}} = $v; }
+    # --- Process implied options and defaults ---
 
-        @$hrOptsOut{keys %newvals} = values %newvals;
-    } #end option mapping.  ^ Thanks to http://www.perlmonks.org/?node_id=135163
+    # Default non-tty input is --xargs
+    $hrOptsOut->{LIKE_XARGS} = true
+        unless(@ARGV || (-t STDIN) || have('AT_FILE') || have('AT_FILE_EOL'));
 
-    # --- Process implied options. ---
-    # Note: have to use ampersand on &RECURSIVE_GLOB per
-    # http://stackoverflow.com/a/96869/2877364 by
-    # http://stackoverflow.com/users/3101/nohat
+    # --xargs implies "--from -"
+    if($hrOptsOut->{LIKE_XARGS}) {
+        if(have('AT_FILE')) {
+            push(@{$hrOptsOut->{AT_FILE}}, "-")
+        } else {
+            $hrOptsOut->{AT_FILE} = ["-"];
+        }
+    } #endif --xargs
 
     # -d overrides -R
     if($hrOptsOut->{DIR_AS_DIR}) {
@@ -556,15 +563,6 @@ sub parse_command_line_into {
             exit EXIT_PARAM_ERR;
         }
     } #endif --rglob
-
-    # --xargs implies "--from -"
-    if($hrOptsOut->{LIKE_XARGS}) {
-        if(have('AT_FILE')) {
-            push(@{$hrOptsOut->{AT_FILE}}, "-")
-        } else {
-            $hrOptsOut->{AT_FILE} = ["-"];
-        }
-    } #endif --xargs
 
     # --- Sorting options ---
     # XXX expand to support other sorts
@@ -598,7 +596,7 @@ sub parse_command_line_into {
 
         if(@sorts > 1) {
             print "I can't sort by multiple keys (",
-                join(" ", map { '-' . $_} @sorts), ").\n";
+                join(" ", map { '-' . $_ } @sorts), ").\n";
             exit EXIT_PARAM_ERR;
         }
     } # end multi-sort check
@@ -647,7 +645,7 @@ sub parse_command_line_into {
         $hrOptsOut->{SORTDIR} = 1;     # ascending by default
     }
 
-    # --- Set other internal values based on the provided options ---
+    # --- Output options ---
 
     # Handle -b, --escape, --noescape.  --noescape always wins if given.
 
@@ -678,13 +676,15 @@ sub parse_command_line_into {
             $hrOptsOut->{SHOULD_ESCAPE} ? TERM_EOL : TERM_NULL;
     }
 
-    # Globbing
+    # --- Globbing ---
+
     if($hrOptsOut->{RECURSIVE_GLOB} || $hrOptsOut->{DO_GLOB}) {
         print STDERR "Globbing not yet implemented.\n";     # XXX
         exit EXIT_PARAM_ERR;
     }
 
-    # Leaves-only mode
+    # --- Leaves-only mode ---
+
     if($hrOptsOut->{LEAVES_ONLY}) {
         print STDERR "--leaf not yet implemented.\n";       # XXX
         exit EXIT_PARAM_ERR;
@@ -793,8 +793,24 @@ ls0 - List filenames, with each output null-terminated.
 
 ls0 [options] [--] [pathspecs]
 
-If no pathspecs or atfiles are given, list non-dotfiles in the current
-directory.  Run ls0 --help for options, or ls0 --man for full documentation.
+Run ls0 --help for options, or ls0 --man for full documentation.
+By default, if no pathspecs or atfiles are given, ls0 will:
+
+=over
+
+=item if stdin is a tty,
+
+list files in the current directory;
+
+=item otherwise,
+
+take NULL-separated input from stdin and list it.
+
+=back
+
+Example: C<< find . -name 'some*pattern' -print0 | ls0 -t >>
+displays filenames matching C<some*pattern>, newest first,
+even if those filenames contain special characters.
 
 =head1 OPTIONS
 
@@ -909,6 +925,11 @@ to get the same effect with the benefits of (1) the safety NULL terminators
 provide, and (2) support for a higher match count than the command line
 can handle.
 
+This is the default unless:
+the input is a tty;
+you have provided at least one pathspec on the command line; or
+you have named at least one atfile on the command line.
+
 =back
 
 =head2 Reading atfiles
@@ -918,6 +939,25 @@ files as if those entries had been specified on the command line.  Things to
 bear in mind:
 
 =over
+
+=item *
+
+Since entries are as if specified on the command line, they are subject to
+B<-d>, B<-R>, and other options that affect how command-line parameters are
+treated.  For example,
+C<< echo 'foo/' | ls0 --fromeol - >> will list the
+contents of directory C<foo>, whereas
+C<< echo 'foo/' | ls0 --fromeol - -d >> (with B<-d>) will list the
+name of directory C<foo>.
+
+This may be an issue when piping C<find> output into ls0.  Unless you
+exclude C<.> from the C<find> results, e.g., with
+
+    find . -name '.' -o -print0
+
+you are likely to see two listings for each file in the current directory:
+one from the C<find> listing for that file, and one from when ls0 expands
+C<.> into a list of its contents.
 
 =item *
 
