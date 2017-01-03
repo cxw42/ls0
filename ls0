@@ -46,9 +46,6 @@ use constant {          # output-record terminators
     TERM_EOL => "\n",   # which will be translated to CRLF if necessary.
 };                      # per http://www.perlmonks.org/?node_id=890769
 
-# Regexes
-use constant RE_DOT_OR_DOTDOT => qr/^\.{1,2}$/;     # cwd or parent
-
 # --- Command-line arguments ---
 my %CMDLINE_OPTS = (
     # hash from internal name to either:
@@ -127,19 +124,28 @@ package Worklist_Item {
     use constant { false => 0, true  => 1 };    # constants are per-package
     use constant DEBUG => true;
 
-    use fields qw(srtext top fromglob visible stat);
+    use fields qw(srText bTop bFromGlob bVisible stat wliParent bNonleaf);
         # TODO later: use Class::Struct instead?
+        # - srText is this item's filename/pathname/glob pattern.
+        # - bTop is whether this was a top-level item, i.e., listed on the
+        #   command line or in an atfile.
+        # - bFromGlob is whether this item was created during glob expansion
+        # - bVisible is whether this item should be included in the results.
+        # - stat is the stat structure from File::stat().
+        # - wliParent is the directory this item is in
+        # - bNonleaf is true if we know this item has child items, i.e.,
+        #   is not a leaf.  bNonLeaf is undef if we haven't seen any children.
 
     sub new {   # ($self, $srText[, $bIsTop]) -> Worklist_Item
         my ($class, $srText, $isTop) = @_;
 
         my Worklist_Item $self = fields::new($class) unless ref $class;
-        @$self{'top', 'fromglob', 'visible', 'stat'} =
-            (false, false, true, undef);
+        @$self{'bTop', 'bFromGlob', 'bVisible', 'stat', 'wliParent',
+            'bNonleaf'} = (false, false, true, undef, undef, undef);
 
         # Fill in from parameters
         $self->text($srText);
-        if(defined $isTop) { $self->{top} = $isTop; }
+        if(defined $isTop) { $self->{bTop} = $isTop; }
         return $self;
     } #new()
 
@@ -149,17 +155,17 @@ package Worklist_Item {
         if(@_) {
             my $arg = shift;
             if(ref($arg) eq "SCALAR") {
-                $self->{srtext} = $arg;
+                $self->{srText} = $arg;
             } else {
-                $self->{srtext} = \$arg;
+                $self->{srText} = \$arg;
             }
         } #endif text provided
-        return ${$self->{srtext}};  # always a getter
+        return ${$self->{srText}};  # always a getter
     } #text() setter/getter
 
     sub suppress {  # ($self) -> undef
         my Worklist_Item $self = shift;
-        $self->{visible} = false;
+        $self->{bVisible} = false;
     } #suppress() setter
 } # Worklist_Item
 
@@ -240,7 +246,7 @@ sub main {
 
         for my Worklist_Item $wli (@$lrSortedWorklist) {
             # skip ones we cleared
-            next unless $wli->{visible};
+            next unless $wli->{bVisible};
 
             # escape if requested
             $wli->text(make_printable ($wli->text =~ s|^./||r)) if $esc;
@@ -288,14 +294,14 @@ sub process_worklist {
 
         # If we are processing anything other than the output worklist,
         # tack the results onto that ever-growing list.  We do this in
-        # case @ARGV is a long list from an xargs --- we don't want to
-        # copy it, just in case.
+        # case @ARGV is a long list from an atfile --- we don't want to
+        # copy the corresponding worklist from main(), just in case.
         if($lrWorklist != $lrOutputWorklist) {
             push @$lrOutputWorklist, @$lrWorklist;
         }
 
         # Set up for the next iteration
-        $lrWorklist = make_worklist \@addl;
+        $lrWorklist = make_worklist \@addl;     #TODO move this into p_wl_i()
         $done = !@addl;
 
     } # while !$done
@@ -326,13 +332,17 @@ sub process_worklist_item {
     #    }
     #} # endif DO_GLOB
 
-    # Process this worklist item, which represents a single directory entry
+    # Now this worklist item represents a single directory entry.
 
+    # Mark the parent as non-leaf
+    $wli->{wliParent}->{bNonleaf} = true if defined $wli->{wliParent};
+
+    # Stat the item
     my $item_text = $wli->text;
     my $fileinfo = stat($item_text);
 
     if(!$fileinfo) {
-        push @$lrFailures, "Could not stat $item_text";
+        push @$lrFailures, "Could not access '$item_text'";
         $wli->suppress;     # don't display it, since it's not actually there!
         return;
     }
@@ -350,7 +360,7 @@ sub process_worklist_item {
     my $most_dot = $hrOpts->{MOST_DOT};
     my $recursive = $hrOpts->{RECURSE};
     my $dash_d = $hrOpts->{DIR_AS_DIR};    # dash_d => not recursive
-    my $isTop = $wli->{top};
+    my $isTop = $wli->{bTop};
         # "top-level" means it was specified on the command line.
     my $one_arg = $hrOpts->{ONE_ARG};
 
@@ -412,6 +422,12 @@ sub process_worklist_item {
                     # Also pushes . and .., which are ignored by the code above
                     # when we get to them in a later call.
             } #endif dir opened OK
+
+            # TODO move the make_worklist call down here and make @addl a
+            # list of worklist items rather than of strings.
+
+            # TODO set parents of the new items to $wli.
+
         } # endif recursing
 
     } else {    # not a directory - treat files, pipes, links, &c. all as files
@@ -421,8 +437,8 @@ sub process_worklist_item {
         }
     } #endif is a directory else
 
-#    print STDERR "  visible ", $wli->{visible}, "\n" if DEBUG;
-    return $wli->{visible};
+#    print STDERR "  visible ", $wli->{bVisible}, "\n" if DEBUG;
+    return $wli->{bVisible};
 } # process_worklist_item()
 
 sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
@@ -453,8 +469,9 @@ sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
             @$lrWorklist;
 
     } else {
-        die "Unsupported sort type $sort_type\n";   # TODO
+        die "Unsupported sort type $sort_type\n";   # This shouldn't happen
     }
+
     return \@sorted;
 } # sort_results()
 # }}}2
