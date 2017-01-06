@@ -124,7 +124,7 @@ package Worklist_Item {
     use constant { false => 0, true  => 1 };    # constants are per-package
     use constant DEBUG => true;
 
-    use fields qw(srText bTop bFromGlob bVisible stat wliParent bNonleaf);
+    use fields qw(srText bTop bFromGlob bVisible stat wliParent bNonLeaf);
         # TODO later: use Class::Struct instead?
         # - srText is this item's filename/pathname/glob pattern.
         # - bTop is whether this was a top-level item, i.e., listed on the
@@ -133,15 +133,15 @@ package Worklist_Item {
         # - bVisible is whether this item should be included in the results.
         # - stat is the stat structure from File::stat().
         # - wliParent is the directory this item is in
-        # - bNonleaf is true if we know this item has child items, i.e.,
+        # - bNonLeaf is true if we know this item has child items, i.e.,
         #   is not a leaf.  bNonLeaf is undef if we haven't seen any children.
 
-    sub new {   # ($self, $srText[, $bIsTop]) -> Worklist_Item
-        my ($class, $srText, $isTop) = @_;
+    sub new {   # ($self, $srText[, $bIsTop[, $wliParent]]) -> Worklist_Item
+        my ($class, $srText, $isTop, $wliParent) = @_;
 
         my Worklist_Item $self = fields::new($class) unless ref $class;
         @$self{'bTop', 'bFromGlob', 'bVisible', 'stat', 'wliParent',
-            'bNonleaf'} = (false, false, true, undef, undef, undef);
+            'bNonLeaf'} = (false, false, true, undef, $wliParent, undef);
 
         # Fill in from parameters
         $self->text($srText);
@@ -180,9 +180,9 @@ sub process_worklist;
     # is to be printed as a result.
 
 sub process_worklist_item;
-    # takes ($hrOpts, $wli, $lrFailures, $lrAddl).
-    # Adds to @$lrAddl any pathspecs needing processing.  This yields a
-    # breadth-first search of the space.  May modify $wli.
+    # takes ($hrOpts, $wli, $lrFailures, $lrAddlWlis).
+    # Adds to @$lrAddlWlis any worklist items needing processing.
+    # This yields a breadth-first search of the space.  May modify $wli.
     # Adds to @$lrFailures any error messages.
     # Returns a bool indicating whether the worklist item is visible.
 
@@ -232,11 +232,12 @@ sub main {
 
     # Do it, Rockapella!
     my @failures;   # which pathspecs we couldn't process
-    if(process_worklist(\%opts,
-                            $lrWorklist, $lrWorklist, \@failures)) {
+    my $ok = process_worklist(\%opts,
+                            $lrWorklist, $lrWorklist, \@failures);
                         #                ^^^^^^^^^^^ output
                         #   ^^^^^^^^^^^ input
 
+    if($ok) {
         # Sort however the user wanted
         my $lrSortedWorklist = sort_results(\%opts, $lrWorklist);
 
@@ -247,6 +248,9 @@ sub main {
         for my Worklist_Item $wli (@$lrSortedWorklist) {
             # skip ones we cleared
             next unless $wli->{bVisible};
+
+            # skip non-leaves if requested
+            next if $opts{LEAVES_ONLY} && $wli->{bNonLeaf};
 
             # escape if requested
             $wli->text(make_printable ($wli->text =~ s|^./||r)) if $esc;
@@ -268,8 +272,9 @@ sub main {
     } #endif @failures
 
 } # main()
+# }}}2
 
-# === Worker routines ===================================================
+# === Worker routines =================================================== {{{2
 
 sub process_worklist {
     my ($hrOpts, $lrProvidedWorklist, $lrOutputWorklist, $lrFailures,
@@ -277,17 +282,22 @@ sub process_worklist {
 
     my $bHaveVisibleResults = false;        # whether there's a result to print
     my $lrWorklist = $lrProvidedWorklist;   # changes as we run
-    my @addl;   # this will hold paths to be processed next.
-                # Using @addl means we don't have to mutate a possibly-long
-                # $lrWorklist.
 
-    my $done = false;
-    while(!$done) {
-        @addl = ();     # always start fresh
+    # Buffers to hold worklist items to be processed next.  Using these means
+    # we don't have to mutate a possibly-long $lrWorklist.  Use ping-pong
+    # to avoid extra copying.
+    my (@addlWlisPing, @addlWlisPong);      # start out empty
+    my $writePing = true;       # which one will get the new items
+
+    while(@$lrWorklist) {
+        # Start fresh
+        if($writePing) { @addlWlisPing=(); } else { @addlWlisPong=(); }
 
         for my Worklist_Item $wli (@$lrWorklist) {
             my $vis =
-                process_worklist_item($hrOpts, $wli, $lrFailures, \@addl);
+                process_worklist_item($hrOpts, $wli, $lrFailures,
+                    ($writePing ? \@addlWlisPing : \@addlWlisPong) );
+                # read from ping, write into pong, or vice versa.
             $bHaveVisibleResults ||= $vis;
                 # Can't do $bHR ||= process_item() because ||= short-circuits
         } # foreach $path
@@ -301,16 +311,15 @@ sub process_worklist {
         }
 
         # Set up for the next iteration
-        $lrWorklist = make_worklist \@addl;     #TODO move this into p_wl_i()
-        $done = !@addl;
-
-    } # while !$done
+        $lrWorklist = ($writePing ? \@addlWlisPing : \@addlWlisPong);
+        $writePing = !$writePing;
+    } # while worklist items remain to be processed
 
     return $bHaveVisibleResults;
 } # process_worklist()
 
 sub process_worklist_item {
-    my ($hrOpts, $wli, $lrFailures, $lrAddl) = @_;
+    my ($hrOpts, $wli, $lrFailures, $lrAddlWlis) = @_;
 
     # XXX implement globs
     #my $pathspec = $$srPathspec;
@@ -321,7 +330,7 @@ sub process_worklist_item {
     #        push @$lrFailures, "No files matched '" . make_printable $$srPathspec . "'.";
     #        return;
     #    } elsif(scalar @results > 1) {
-    #        push @$lrAddl, @results;
+    #        push @$lrAddlWlis, @results;
     #       $$srPathspec=undef;     # Remove the glob (or something).
     #        return;                # Different for recursive glob.
     #    } else {
@@ -333,9 +342,6 @@ sub process_worklist_item {
     #} # endif DO_GLOB
 
     # Now this worklist item represents a single directory entry.
-
-    # Mark the parent as non-leaf
-    $wli->{wliParent}->{bNonleaf} = true if defined $wli->{wliParent};
 
     # Stat the item
     my $item_text = $wli->text;
@@ -410,25 +416,20 @@ sub process_worklist_item {
             $wli->suppress;
         }
 
-        if($bShouldDescend) {
+        if($bShouldDescend) {   # Add this dir's entries as worklist items
             my $dirh;
             if(!opendir($dirh, $item_text)) {
                 push @$lrFailures, "Could not read directory $item_text";
             } else {
-                push @$lrAddl,
+                push @$lrAddlWlis,
                     (map { my $rv = catfile $item_text, $_;
                             #print STDERR "    Added -$rv-\n" if DEBUG;
-                            $rv } readdir($dirh));
+                            Worklist_Item::->new($rv, false, $wli)
+                            } readdir($dirh));
                     # Also pushes . and .., which are ignored by the code above
                     # when we get to them in a later call.
             } #endif dir opened OK
-
-            # TODO move the make_worklist call down here and make @addl a
-            # list of worklist items rather than of strings.
-
-            # TODO set parents of the new items to $wli.
-
-        } # endif recursing
+        } # endif descending
 
     } else {    # not a directory - treat files, pipes, links, &c. all as files
         if(!$isWanted) {        # Drop dotfiles unless requested
@@ -436,6 +437,11 @@ sub process_worklist_item {
             $wli->suppress;
         }
     } #endif is a directory else
+
+    # Mark the parent as non-leaf if we are a visible child
+    if(defined($wli->{wliParent}) && $wli->{bVisible}) {
+        $wli->{wliParent}->{bNonLeaf} = true;
+    }
 
 #    print STDERR "  visible ", $wli->{bVisible}, "\n" if DEBUG;
     return $wli->{bVisible};
@@ -698,13 +704,6 @@ sub parse_command_line_into {
 
     if($hrOptsOut->{RECURSIVE_GLOB} || $hrOptsOut->{DO_GLOB}) {
         print STDERR "Globbing not yet implemented.\n";     # XXX
-        exit EXIT_PARAM_ERR;
-    }
-
-    # --- Leaves-only mode ---
-
-    if($hrOptsOut->{LEAVES_ONLY}) {
-        print STDERR "--leaf not yet implemented.\n";       # XXX
         exit EXIT_PARAM_ERR;
     }
 
