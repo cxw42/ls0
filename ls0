@@ -12,6 +12,8 @@
 
 package Com::DevWrench::Ls0;
 
+use constant LS0_VERSION => '0.1';
+
 # === Code ========================================================= {{{1
 # Declarations {{{2
 
@@ -59,6 +61,7 @@ my %CMDLINE_OPTS = (
     ESCAPE_OUTPUT_ONECHAR => 'b',
         # No default so we can tell what the user asked for
     DIR_AS_DIR => ['d', false],
+    OUTPUT_FIELDS => 'e|echo=s@',   # what to output (-e = echo)
     OUTPUT_TERM_IS_EOL => 'eol!',
         # terminator for each entry, including the last
     ESCAPE_OUTPUT => 'escape!',
@@ -80,6 +83,8 @@ my %CMDLINE_OPTS = (
     SORT_OPT_TIME => ['t', false],      # Sort on some time (mtime by default)
     SORT_OPT_WHICHTIME => 'time=s',     # Which time to sort on
     SORT_OPT_NOSORT => ['U', false],
+
+    # Note: --version reserved
 
     LIKE_XARGS => ['xargs', false],
 
@@ -244,6 +249,7 @@ sub main {
         # Dump the (possibly escaped) results
         my $trm = $opts{OUTPUT_TERM};
         my $esc = $opts{SHOULD_ESCAPE};
+        my @flds = @{$opts{OUTPUT_FIELDS}};
 
         for my Worklist_Item $wli (@$lrSortedWorklist) {
             # skip ones we cleared
@@ -252,11 +258,14 @@ sub main {
             # skip non-leaves if requested
             next if $opts{LEAVES_ONLY} && $wli->{bNonLeaf};
 
-            # escape if requested
-            $wli->text(make_printable ($wli->text =~ s|^./||r)) if $esc;
-                # like ls(1), don't start with "./"  ^^^^^^^^
+            # TODO loop over @flds and print them
 
-            print $wli->text, $trm;
+            my $val = $wli->text;
+            # escape if requested
+            $val = make_printable($val =~ s{^./}{}r) if $esc;
+                # s{}{}: like ls(1), don't start with "./"
+
+            print $val, $trm;
         } # next $result
     } # endif any results
 
@@ -540,7 +549,7 @@ sub parse_command_line_into {
 
     # Get options
     GetOptions($hrOptsOut,  # destination hash
-        'usage|?', 'help', 'man',
+        'usage|?', 'help', 'man', 'version',
         map { ref($_) ? $_->[0] : $_ } values %CMDLINE_OPTS,    # options strs
         )
     or pod2usage(-verbose => 0, -exitval => EXIT_PARAM_ERR);    # unknown opt
@@ -550,6 +559,12 @@ sub parse_command_line_into {
     pod2usage(-verbose => 1, -exitval => 1) if have('help');
     pod2usage(-verbose => 2, -exitval => 1) if have('man');
 
+    if(have('version')) {
+        print "ls0 version " . LS0_VERSION .
+            ".  Copyright (c) 2017 Chris White.\n";
+        exit(EXIT_OK);
+    }
+
     { # Map the option names from GetOptions back to the internal names we use
         my %revmap = map {  optname($_) => $_ } keys %CMDLINE_OPTS;
         for my $optname (keys %$hrOptsOut) {
@@ -558,6 +573,9 @@ sub parse_command_line_into {
     } #end option mapping.
 
     # --- Process implied options and defaults ---
+
+    # Default output field is $wli->text
+    $hrOptsOut->{OUTPUT_FIELDS} = ['text'] unless have('OUTPUT_FIELDS');
 
     # Default non-tty input is --xargs
     $hrOptsOut->{LIKE_XARGS} = true
@@ -732,6 +750,13 @@ sub parse_command_line_into {
     } #end duplicate-check
 
     { # read atfiles
+
+        # TODO figure out whether to handle, e.g., "find . -print0 | ls0".
+        # This results in printing two copies of every entry in ".", since
+        # the entries are printed as part of processing of "." and also
+        # as the individual entries from find(1).  However, the same
+        # happens with ls(1), so maybe it's not a big deal.
+
         my @entries;    # list of all the pathspecs in the atfiles
 
         if(have('AT_FILE')) {
@@ -858,6 +883,13 @@ If multiple escaping options are given, B<--noescape> controls (if specified).
 List directories as directories; don't list their contents.  Overrides B<-R>.
 Can't be used with B<--rglob>.
 
+=item B<< -e <field> >>, B<< --echo <field> >>
+
+B<Not yet implemented.>
+Output B<< <field> >> for each file to be printed.  Multiple B<-e> options
+can be specified, and the fields will be output in that order.
+Each field will be terminated by the output terminator (see B<--eol>).
+
 =item B<--eol> (disable with B<--noeol>)
 
 Terminate output entries with a platform-specific end-of-line sequence
@@ -869,7 +901,7 @@ active (by default or by B<-b> or B<--escape>).
 If multiple escaping or terminator entries are given, B<--noeol> controls
 (if specified).
 
-=item B<< --from <atfile> >> (or B<< -@ <atfile> >>)
+=item B<< --from <atfile> >>, B<< -@ <atfile> >>
 
 Read the pathspecs to be processed from B<atfile>; specify "-" to read from
 standard input.  Each pathspec in B<atfile> should
@@ -1010,6 +1042,12 @@ characters at the end of them.
 
 =over
 
+=item B<< -e <field> >>, B<< --echo <field> >>
+
+Output only specific fields.  Each field is separated by the output terminator
+rather than being printed together on a line.  That way a single loop can
+read all the output values for all the matched files.
+
 =item B<< --from <atfile> >>, B<< --fromeol <atfile> >>
 
 Read input pathspecs from B<atfile>.
@@ -1036,14 +1074,21 @@ The following GNU ls(1) options are not supported by ls0:
 =over
 
 =item B<-1> (print single line), B<-C> (list down columns),
-B<-m> (comma-separated output), B<-x> (list across rows), B<--format>
+B<-m> (comma-separated output), B<-x> (list across rows), B<--format>,
+B<-T>, B<--tabsize>, B<-w>/B<--width>
 
 We don't print these formats; we only support NULL and EOL as delimiters,
-and don't do multicolumn.
-Our B<-b> implies one line per file.
+and don't do multicolumn or fixed column widths.
+Our B<-b> implies one line per output item.
 
-=item B<-F>/B<--file-type> (print indicators),
+=item B<-l>/B<-g>/B<-o> (long listings), B<--full-time>,
+B<-s> (print sizes)
+
+We use B<-e>, instead of these options, to specify which fields to output.
+
+=item B<-F>/B<--file-type>/B<--indicator-style>/B<-p> (print indicators),
 B<-N>/B<--literal> (print names literally), B<-q> (hide control chars),
+B<--show-control-chars> (print control characters raw),
 B<-Q>/B<--quote-name> (quote output), B<--quoting-style>
 
 We only print raw or with backslash escapes (B<-b>), so we don't support these.
@@ -1055,6 +1100,10 @@ Nope.  Sorry!
 =item B<-D>
 
 Long live vi!
+
+=item B<--lcontext>, B<-Z>, B<--context>
+
+We don't support SELinux at this time.
 
 =back
 
