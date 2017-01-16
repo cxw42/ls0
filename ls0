@@ -751,12 +751,6 @@ sub parse_command_line_into {
 
     { # read atfiles
 
-        # TODO figure out whether to handle, e.g., "find . -print0 | ls0".
-        # This results in printing two copies of every entry in ".", since
-        # the entries are printed as part of processing of "." and also
-        # as the individual entries from find(1).  However, the same
-        # happens with ls(1), so maybe it's not a big deal.
-
         my @entries;    # list of all the pathspecs in the atfiles
 
         if(have('AT_FILE')) {
@@ -1141,6 +1135,17 @@ example, you may get:
     bar/file_in_bar
 
 (the breadth-first order), although you may get a different order.
+
+=head1 NOTES
+
+=head2 Trimming duplicates: file, expanded directory
+
+The command C<find . -print0 | ls0> will
+print two copies of every entry in C<.>, since
+the entries are printed as part of processing of C<.> and also
+as the individual entries output by find(1).  (The same
+happens with ls(1).)  To trim these duplicates, use B<-d>:
+C<find . -print0 | ls0 -d>.
 
 =head1 COPYRIGHT
 
