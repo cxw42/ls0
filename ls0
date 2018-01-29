@@ -2,6 +2,7 @@
 # ls0: A "ls" replacement that null-terminates its output filenames.
 # To see the output on the console, pipe it to cat -A (nulls show as ^@)
 # or to od -c.
+# Copyright and license information at end of file.
 # XXX marks features to be implemented; TODO marks other items to do.
 
 # TODO? add an option to prune specific directories, files, globs, ...?
@@ -203,8 +204,8 @@ sub make_worklist;      # takes $lrStrings, $bIsTop; returns $lrWorklist.
 # Command-line handling
 sub parse_command_line_into;    # takes and modifies $hrOpts; modifies @ARGV
 sub read_entries;               # read entries from an atfile; returns \@items
-# }}}2
 
+# }}}2
 # === Main ========================================================= {{{2
 
 main();         # Invoke.
@@ -281,8 +282,8 @@ sub main {
     } #endif @failures
 
 } # main()
-# }}}2
 
+# }}}2
 # === Worker routines =================================================== {{{2
 
 sub process_worklist {
@@ -489,8 +490,8 @@ sub sort_results {  # ($hrOpts, $lrWorklist) -> $lrSortedWorklist
 
     return \@sorted;
 } # sort_results()
-# }}}2
 
+# }}}2
 # === Utility routines ============================================= {{{2
 
 sub make_worklist {
@@ -511,8 +512,8 @@ sub make_printable {
         # For hex, use s/.../'\x'.unpack('H*', $1)/ger per
         # http://perldoc.perl.org/perlpacktut.html#The-Basic-Principle
 } # make_printable()
-# }}}2
 
+# }}}2
 # === Command line ================================================= {{{2
 
 sub parse_command_line_into {
@@ -814,18 +815,18 @@ sub read_entries {
 # }}}2
 
 __END__
-# }}}1
 
+# }}}1
 # Documentation {{{2
 =pod
 
 =encoding UTF-8
 
-=head1 NAME
+=head1 Name
 
 ls0 - List filenames, with each output null-terminated.
 
-=head1 SYNOPSIS
+=head1 Synopsis
 
 ls0 [options] [--] [pathspecs]
 
@@ -848,25 +849,24 @@ Example: C<< find . -name 'some*pattern' -print0 | ls0 -t >>
 displays filenames matching C<some*pattern>, newest first,
 even if those filenames contain special characters.
 
-=head1 OPTIONS
+=head1 Options
 
 =over
 
 =item B<-a>
 
-Also list files beginning with a '.'
+Also list files beginning with a C<.>
 
 =item B<-A>
 
-Also list files beginning with a '.', except for '.' and '..'
+Also list files beginning with a C<.>, except for C<.> and C<..>
 
 =item B<-b>, B<--escape> (disable with B<--noescape>)
 
 Print octal escapes for special characters and backslashes
-(which are \134).
-Implies B<--eol>
-(newline terminators); also specify B<--noeol> if you still want null
-terminators.
+(which are C<\134>).
+Implies B<--eol> (newline terminators);
+also specify B<--noeol> if you still want null terminators.
 
 By default, output is escaped if standard output is a terminal.
 
@@ -897,9 +897,9 @@ If multiple escaping or terminator entries are given, B<--noeol> controls
 
 =item B<< --from <atfile> >>, B<< -@ <atfile> >>
 
-Read the pathspecs to be processed from B<atfile>; specify "-" to read from
+Read the pathspecs to be processed from B<atfile>; specify C<-> to read from
 standard input.  Each pathspec in B<atfile> should
-be separated by a NULL terminator ('\0').  This is ls_0_, after all.
+be separated by a NULL terminator (C<\0>).  This is ls_0_, after all.
 The input is read in binary mode, so filenames can contain any non-NULL
 character.
 
@@ -914,7 +914,7 @@ See L</"Reading atfiles"> for details.
 
 =item B<--glob>
 
-Expand the provided pathspecs using perl's File::Glob::bsd_glob.
+Expand the provided pathspecs using perl's C<File::Glob::bsd_glob>.
 This is provided for shells that don't glob, or don't glob as you expect.
 Make sure to quote the arguments if necessary to prevent your shell from
 globbing before ls0 sees them.
@@ -969,9 +969,22 @@ provide, and (2) support for a higher match count than the command line
 can handle.
 
 This is the default unless:
+
+=over
+
+=item *
+
 the input is a tty;
+
+=item *
+
 you have provided at least one pathspec on the command line; or
+
+=item *
+
 you have named at least one atfile on the command line.
+
+=back
 
 =back
 
@@ -993,14 +1006,8 @@ contents of directory C<foo>, whereas
 C<< echo 'foo/' | ls0 --fromeol - -d >> (with B<-d>) will list the
 name of directory C<foo>.
 
-This may be an issue when piping C<find> output into ls0.  Unless you
-exclude C<.> from the C<find> results, e.g., with
-
-    find . -name '.' -o -print0
-
-you are likely to see two listings for each file in the current directory:
-one from the C<find> listing for that file, and one from when ls0 expands
-C<.> into a list of its contents.
+This may be an issue when piping C<find> output into ls0;
+see L</"Trimming duplicates"> for details and workarounds.
 
 =item *
 
@@ -1030,9 +1037,9 @@ characters at the end of them.
 
 =back
 
-=head1 DIFFERENCES BETWEEN GNU ls(1) and ls0(1)
+=head1 Differences between GNU ls(1) and ls0(1)
 
-=head2 New Features
+=head2 New features
 
 =over
 
@@ -1061,7 +1068,7 @@ Only list leaves.
 
 =back
 
-=head2 Unsupported ls(1) Features
+=head2 Unsupported ls(1) features
 
 The following GNU ls(1) options are not supported by ls0:
 
@@ -1106,8 +1113,8 @@ We don't support SELinux at this time.
 =head3 Default search order
 
 ls(1) sorts case-insensitively by default, e.g., C<alpha, BAR, foo, QUUX>.
-We sort on byte values without regard to case or encoding, e.g. (in ASCII),
-C<BAR, QUUX, alpha, foo>.
+We sort on byte values without regard to case or encoding, e.g.,
+C<BAR, QUUX, alpha, foo> (in ASCII).
 
 =head3 Output format for multiple subdirectories
 
@@ -1136,20 +1143,34 @@ example, you may get:
 
 (the breadth-first order), although you may get a different order.
 
-=head1 NOTES
+=head1 Notes
 
-=head2 Trimming duplicates: file, expanded directory
+=head2 Trimming duplicates
 
 The command C<find . -print0 | ls0> will
 print two copies of every entry in C<.>, since
 the entries are printed as part of processing of C<.> and also
 as the individual entries output by find(1).  (The same
-happens with ls(1).)  To trim these duplicates, use B<-d>:
-C<find . -print0 | ls0 -d>.
+happens with ls(1).)  To trim these duplicates, you can:
 
-=head1 COPYRIGHT
+=over
 
-Copyright (c) 2016 Chris White L<http://www.devwrench.com>
+=item Use B<-d>:
+
+C<find . -print0 | ls0 -d> will print C<.> as itself, and not expand its
+contents.
+
+=item Exclude C<.> from the C<find> results:
+
+C<find . -name '.' -o -print0> will cause C<find> to omit C<.>
+from its results.  Therefore, ls0 will not process C<.>, and so will not
+expand its contents.
+
+=back
+
+=head1 Copyright
+
+Copyright (c) 2016--2018 Chris White L<http://www.devwrench.com>
 CC-BY-SA 3.0
 
 Inspired by L<https://stackoverflow.com/a/41168189/2877364> by
@@ -1164,4 +1185,3 @@ L<ruel|http://stackoverflow.com/users/459338/ruel>.
 # }}}2
 
 # vi: set ts=4 sts=4 sw=4 et ai ff=unix fenc=utf8 foldmethod=marker foldenable foldlevel=1: #
-
